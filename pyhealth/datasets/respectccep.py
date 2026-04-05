@@ -1,10 +1,12 @@
-"""PyHealth dataset for the RESPect CCEP Dataset.
+"""PyHealth dataset implementation for RESPect CCEP (OpenNeuro ds004080).
 
 Dataset link:
-    https://github.com/OpenNeuroDatasets/ds004080
+    https://openneuro.org/datasets/ds004080
 
-This module provides the RESPectCCEPDataset class for loading and processing
-Cortico-Cortical Evoked Potentials (CCEPs) data organized in BIDS format.
+This dataset class follows the common PyHealth pattern for file-based datasets:
+it builds a lightweight metadata CSV index (one row per BIDS run) and stores
+file pointers to raw signal/annotation sidecars rather than embedding raw
+waveforms directly in tabular metadata.
 """
 
 import logging
@@ -13,104 +15,85 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from pyhealth.datasets import BaseDataset
+from .base_dataset import BaseDataset
 
 logger = logging.getLogger(__name__)
 
 
 class RESPectCCEPDataset(BaseDataset):
-    """Dataset class for the RESPect CCEP dataset.
+    """Base dataset for RESPect CCEP (OpenNeuro ds004080).
 
-    This dataset consists of cortico-cortical evoked potentials (CCEPs)
-    measured with electrocorticography (ECoG) during single pulse electrical
-    stimulation (SPES) in 74 patients. The raw data is organized in BIDS.
+    This dataset indexes the BIDS iEEG directory into one metadata row per run
+    (``*_events.tsv``), then lets ``BaseDataset`` expose those rows as PyHealth
+    events.
 
-    The dataset class flattens the BIDS hierarchy into a single metadata CSV
-    with one row per run-level ``*_events.tsv`` file. Each row keeps patient
-    demographics from ``participants.tsv`` together with file pointers to the
-    run-specific and session-specific BIDS sidecars that downstream tasks can
-    dereference.
+    Indexing behavior:
+    - Scans ``sub-*/ses-*/ieeg/*_events.tsv`` files.
+    - Extracts BIDS entities: ``participant_id``, ``session_id``, ``run_id``.
+    - Attaches participant demographics from ``participants.tsv``.
+    - Resolves run/session sidecars (channels, electrodes, coordsystem, BrainVision triplet, JSON).
+    - Writes ``respect_ccep_metadata-pyhealth.csv`` under ``root``.
+
+    Notes:
+    - Set `root` to the repository directory that includes the dataset files and folders.
+    - Metadata rows keep relative file paths so downstream tasks can load
+      only the raw files they need.
     """
 
     def __init__(
         self,
         root: str,
-        tables: Optional[List[str]] = None,
         dataset_name: Optional[str] = None,
         config_path: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """Initialize the RESPectCCEPDataset.
-
-        This initializer creates a metadata CSV index from the BIDS-organized
-        data if it doesn't already exist, then initializes the BaseDataset with
-        the indexed data.
+        """Initialize the RESPect CCEP dataset.
 
         Args:
-            root: Root directory containing the BIDS dataset with
-                `participants.tsv` and `sub-*/` folders.
-            tables: Additional tables to load beyond the default.
-                Defaults to None.
-            dataset_name: Custom name for the dataset. Defaults to
-                "RESPectCCEPDataset".
-            config_path: Path to the YAML configuration file. If None, uses the
-                default config at `configs/respect_ccep.yaml`.
-            **kwargs: Additional arguments passed to BaseDataset.
+            root: Root directory of the BIDS dataset.
+            dataset_name: Optional custom dataset name. Defaults to
+                ``"respect_ccep"``.
+            config_path: Optional path to dataset YAML config. If not provided,
+                uses ``pyhealth/datasets/configs/respect_ccep.yaml``.
+            **kwargs: Extra keyword arguments forwarded to ``BaseDataset``.
 
         Raises:
-            FileNotFoundError: If `participants.tsv` is not found in root.
-            ValueError: If `participants.tsv` doesn't contain a `participant_id` column.
-
-        Example:
-            >>> dataset = RESPectCCEPDataset(root="/path/to/ds004080/")
-            >>> print(f"Patients: {len(dataset.unique_patient_ids)}")
+            FileNotFoundError: If required dataset files (e.g.,
+                ``participants.tsv``) are missing during metadata creation.
+            ValueError: If ``participants.tsv`` lacks required columns.
         """
         if config_path is None:
-            logger.info("No config path provided, using default config.")
-            config_path = str(Path(__file__).parent / "configs" / "respect_ccep.yaml")
+            logger.info("No config path provided, using default config")
+            config_path = Path(__file__).parent / "configs" / "respect_ccep.yaml"
 
         self._pyhealth_csv = str(Path(root) / "respect_ccep_metadata-pyhealth.csv")
         if not Path(self._pyhealth_csv).exists():
-            logger.info("Indexing BIDS structure and preparing PyHealth metadata...")
-            self._prepare_metadata(root, self._pyhealth_csv)
-
-        default_tables = ["respectccep"]
-        tables = default_tables + (tables or [])
+            self.prepare_metadata(root)
 
         super().__init__(
             root=root,
-            tables=tables,
-            dataset_name=dataset_name or "RESPectCCEPDataset",
+            tables=["respectccep"],
+            dataset_name=dataset_name or "respect_ccep",
             config_path=config_path,
             **kwargs,
         )
 
     @staticmethod
     def _extract_bids_entities(file_path: Path) -> Dict[str, Optional[str]]:
-        """Extract BIDS entities from a BIDS-formatted filename.
-
-        Parses the filename to extract participant ID, session ID, and run ID
-        based on BIDS naming conventions (e.g., `sub-XXX_ses-YYY_run-ZZZ`).
+        """Extract basic BIDS entities from a run filename.
 
         Args:
-            file_path: Path object for a BIDS file.
+            file_path: Path to a BIDS-like file (typically ``*_events.tsv``).
 
         Returns:
-            Dictionary with keys `participant_id`, `session_id`, and `run_id`,
-            each with Optional[str] values (None if not found in filename).
-
-        Example:
-            >>> path = Path("sub-01_ses-1_task-SPES_run-01_events.tsv")
-            >>> entities = RESPectCCEPDataset._extract_bids_entities(path)
-            >>> entities["participant_id"]
-            'sub-01'
+            A dictionary containing ``participant_id``, ``session_id``, and
+            ``run_id``. Missing entities are set to ``None``.
         """
         entities: Dict[str, Optional[str]] = {
             "participant_id": None,
             "session_id": None,
             "run_id": None,
         }
-
         for part in file_path.stem.split("_"):
             if part.startswith("sub-"):
                 entities["participant_id"] = part
@@ -118,177 +101,190 @@ class RESPectCCEPDataset(BaseDataset):
                 entities["session_id"] = part
             elif part.startswith("run-"):
                 entities["run_id"] = part
-
         return entities
 
     @staticmethod
     def _relative_or_none(path: Optional[Path], root_path: Path) -> Optional[str]:
-        """Convert a path to a root-relative POSIX path if it exists.
+        """Convert an absolute path to a root-relative POSIX path.
 
         Args:
-            path: Absolute path to check, or None.
-            root_path: Root path to compute relative path from.
+            path: Candidate path.
+            root_path: Dataset root used as the relativization base.
 
         Returns:
-            Root-relative POSIX path as string if path exists, None otherwise.
+            Relative POSIX path string if ``path`` exists, else ``None``.
         """
         if path is None or not path.exists():
             return None
         return path.relative_to(root_path).as_posix()
 
     @staticmethod
-    def _find_session_electrodes(
+    def _find_session_file(
         ieeg_dir: Path,
         participant_id: Optional[str],
         session_id: Optional[str],
+        suffix: str,
     ) -> Optional[Path]:
-        """Find the session-level electrodes TSV file for an iEEG directory.
+        """Locate a session-level BIDS sidecar in an ``ieeg`` directory.
 
-        Searches for electrodes.tsv files using multiple naming conventions,
-        prioritizing more specific matches (with participant + session) before
-        broader matches.
+        Resolution strategy:
+        1. ``sub-*_ses-*_{{suffix}}``
+        2. ``sub-*_*{{suffix}}``
+        3. first glob match for ``*_{suffix}``
 
         Args:
-            ieeg_dir: Directory to search for electrodes file.
-            participant_id: BIDS participant ID (e.g., 'sub-01'), or None.
-            session_id: BIDS session ID (e.g., 'ses-1'), or None.
+            ieeg_dir: Directory containing iEEG files for a session.
+            participant_id: BIDS participant entity (e.g., ``sub-01``).
+            session_id: BIDS session entity (e.g., ``ses-1``).
+            suffix: Target filename suffix (e.g., ``"electrodes.tsv"``).
 
         Returns:
-            Path to the electrodes.tsv file if found, None otherwise.
+            First matching path if found, otherwise ``None``.
         """
         candidates: List[Path] = []
         if participant_id and session_id:
-            electrodes_file = f"{participant_id}_{session_id}_electrodes.tsv"
-            candidates.append(ieeg_dir / electrodes_file)
+            candidates.append(ieeg_dir / f"{participant_id}_{session_id}_{suffix}")
         if participant_id:
-            candidates.append(ieeg_dir / f"{participant_id}_electrodes.tsv")
-
-        candidates.extend(sorted(ieeg_dir.glob("*_electrodes.tsv")))
-
+            candidates.append(ieeg_dir / f"{participant_id}_{suffix}")
+        candidates.extend(sorted(ieeg_dir.glob(f"*_{suffix}")))
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.exists() and ":Zone.Identifier" not in candidate.name:
                 return candidate
         return None
 
     @staticmethod
     def _find_run_sidecar(events_path: Path, suffix: str) -> Optional[Path]:
-        """Find a run-level sidecar file by replacing the `_events.tsv` suffix.
-
-        Given a path to an `*_events.tsv` file, searches for a companion file
-        with a different suffix (e.g., `_channels.tsv`, `_ieeg.vhdr`).
+        """Locate a run-level sidecar based on an ``*_events.tsv`` file.
 
         Args:
-            events_path: Path to the `*_events.tsv` file.
-            suffix: Suffix to replace `_events.tsv` with (e.g., '_channels.tsv').
+            events_path: Path to the run events file.
+            suffix: Desired companion suffix (e.g., ``"_ieeg.vhdr"``).
 
         Returns:
-            Path to the sidecar file if it exists, None otherwise.
+            Matching sidecar path if present, else ``None``.
         """
-        new_name = events_path.name.replace("_events.tsv", suffix)
-        expected = events_path.with_name(new_name)
+        expected = events_path.with_name(events_path.name.replace("_events.tsv", suffix))
         if expected.exists():
             return expected
         return None
 
-    def _prepare_metadata(self, root: str, output_csv: str) -> None:
-        """Parse BIDS directory structure and generate metadata CSV.
+    def prepare_metadata(self, root: str) -> None:
+        """Create ``respect_ccep_metadata-pyhealth.csv`` from BIDS folders.
 
-        Scans the BIDS directory tree to find all run-level `*_events.tsv` files,
-        extracts BIDS entities and file pointers from each, merges with patient
-        demographics from `participants.tsv`, and writes the result to a single
-        flattened metadata CSV file.
+        The output CSV contains one row per run and is designed to be consumed
+        by ``BaseDataset`` via ``respect_ccep.yaml``.
 
         Args:
-            root: Root directory of the BIDS dataset.
-            output_csv: Path where the output metadata CSV will be written.
+            root: BIDS dataset root directory.
 
         Raises:
-            FileNotFoundError: If `participants.tsv` is not found in root.
-            ValueError: If `participants.tsv` doesn't contain 'participant_id'
-                column.
-
-        Writes:
-            CSV file at `output_csv` with columns:
-                - participant_id: BIDS participant ID
-                - session_id: BIDS session ID (if present)
-                - run_id: BIDS run ID (if present)
-                - *_file_path: Relative paths to BIDS sidecars
-                - Additional columns from participants.tsv demographics
+            FileNotFoundError: If the root or ``participants.tsv`` is missing.
+            ValueError: If ``participants.tsv`` has no ``participant_id``.
         """
         root_path = Path(root)
-        participants_file = root_path / "participants.tsv"
+        if not root_path.exists():
+            raise FileNotFoundError(f"Dataset root does not exist: {root}")
 
-        if not participants_file.exists():
-            msg = f"Dataset root must contain 'participants.tsv'. Searched in {root}"
-            logger.error(msg)
-            raise FileNotFoundError(msg)
+        participants_path = root_path / "participants.tsv"
+        if not participants_path.exists():
+            raise FileNotFoundError(
+                f"participants.tsv not found in dataset root: {participants_path}"
+            )
 
-        df_participants = pd.read_csv(participants_file, sep="\t")
-        if "participant_id" not in df_participants.columns:
-            msg = "participants.tsv must contain a 'participant_id' column"
-            logger.error(msg)
-            raise ValueError(msg)
+        participants_df = pd.read_csv(participants_path, sep="\t")
+        if "participant_id" not in participants_df.columns:
+            raise ValueError("participants.tsv must contain a 'participant_id' column")
 
-        records: List[Dict[str, Optional[str]]] = []
-        for events_path in sorted(root_path.rglob("*_events.tsv")):
+        participant_lookup: Dict[str, Dict[str, object]] = (
+            participants_df.drop_duplicates(subset=["participant_id"], keep="first")
+            .set_index("participant_id")
+            .to_dict(orient="index")
+        )
+        participant_session_lookup: Dict[tuple[str, str], Dict[str, object]] = {}
+        if "session" in participants_df.columns:
+            participant_session_lookup = (
+                participants_df.drop_duplicates(
+                    subset=["participant_id", "session"], keep="first"
+                )
+                .set_index(["participant_id", "session"])
+                .to_dict(orient="index")
+            )
+
+        rows: List[Dict[str, object]] = []
+        event_files: List[Path] = []
+        for subject_dir in sorted(root_path.glob("sub-*")):
+            if not subject_dir.is_dir():
+                continue
+            event_files.extend(sorted(subject_dir.glob("ses-*/ieeg/*_events.tsv")))
+
+        for events_path in event_files:
+            if ":Zone.Identifier" in events_path.name:
+                continue
+
             entities = self._extract_bids_entities(events_path)
             participant_id = entities["participant_id"]
             session_id = entities["session_id"]
             run_id = entities["run_id"]
-            ieeg_dir = events_path.parent
-
-            channels_path = self._find_run_sidecar(events_path, "_channels.tsv")
-            vhdr_path = self._find_run_sidecar(events_path, "_ieeg.vhdr")
-            electrodes_path = self._find_session_electrodes(
-                ieeg_dir=ieeg_dir,
-                participant_id=participant_id,
-                session_id=session_id,
-            )
 
             if participant_id is None:
-                msg = f"Skipping events file without participant entity: {events_path}"
-                logger.warning(msg)
+                logger.warning("Skipping malformed BIDS file without subject: %s", events_path)
                 continue
 
-            records.append({
-                "participant_id": participant_id,
-                "session_id": session_id,
-                "run_id": run_id,
-                "events_file_path": self._relative_or_none(
-                    events_path, root_path
-                ),
-                "channels_file_path": self._relative_or_none(
-                    channels_path, root_path
-                ),
-                "electrodes_file_path": self._relative_or_none(
-                    electrodes_path, root_path
-                ),
-                "vhdr_file_path": self._relative_or_none(vhdr_path, root_path),
-            })
-
-        if records:
-            df_records = pd.DataFrame(records)
-            df_merged = pd.merge(
-                df_records,
-                df_participants,
-                on="participant_id",
-                how="left",
+            ieeg_dir = events_path.parent
+            channels_path = self._find_run_sidecar(events_path, "_channels.tsv")
+            vhdr_path = self._find_run_sidecar(events_path, "_ieeg.vhdr")
+            eeg_path = self._find_run_sidecar(events_path, "_ieeg.eeg")
+            vmrk_path = self._find_run_sidecar(events_path, "_ieeg.vmrk")
+            ieeg_json_path = self._find_run_sidecar(events_path, "_ieeg.json")
+            electrodes_path = self._find_session_file(
+                ieeg_dir, participant_id, session_id, "electrodes.tsv"
             )
-        else:
-            msg = "No *_events.tsv files found. Writing empty metadata index."
-            logger.warning(msg)
-            df_merged = pd.DataFrame(
-                columns=[
-                    "participant_id",
-                    "session_id",
-                    "run_id",
-                    "events_file_path",
-                    "channels_file_path",
-                    "electrodes_file_path",
-                    "vhdr_file_path",
-                ]
-                + list(df_participants.columns.drop("participant_id", errors="ignore"))
+            coordsystem_path = self._find_session_file(
+                ieeg_dir, participant_id, session_id, "coordsystem.json"
             )
 
-        df_merged.to_csv(output_csv, index=False)
-        logger.info("Indexed metadata saved to %s", output_csv)
+            demographics = participant_lookup.get(participant_id, {}).copy()
+            if session_id is not None:
+                session_demographics = participant_session_lookup.get(
+                    (participant_id, session_id), {}
+                )
+                demographics.update(session_demographics)
+
+            rows.append(
+                {
+                    "participant_id": participant_id,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "age": demographics.get("age"),
+                    "sex": demographics.get("sex"),
+                    "participant_session": demographics.get("session"),
+                    "events_file_path": self._relative_or_none(events_path, root_path),
+                    "channels_file_path": self._relative_or_none(channels_path, root_path),
+                    "electrodes_file_path": self._relative_or_none(electrodes_path, root_path),
+                    "coordsystem_file_path": self._relative_or_none(coordsystem_path, root_path),
+                    "vhdr_file_path": self._relative_or_none(vhdr_path, root_path),
+                    "vmrk_file_path": self._relative_or_none(vmrk_path, root_path),
+                    "eeg_file_path": self._relative_or_none(eeg_path, root_path),
+                    "ieeg_json_file_path": self._relative_or_none(ieeg_json_path, root_path),
+                }
+            )
+
+        metadata_cols = [
+            "participant_id",
+            "session_id",
+            "run_id",
+            "age",
+            "sex",
+            "participant_session",
+            "events_file_path",
+            "channels_file_path",
+            "electrodes_file_path",
+            "coordsystem_file_path",
+            "vhdr_file_path",
+            "vmrk_file_path",
+            "eeg_file_path",
+            "ieeg_json_file_path",
+        ]
+        metadata_df = pd.DataFrame(rows, columns=metadata_cols)
+        metadata_df.to_csv(self._pyhealth_csv, index=False)
+        logger.info("Wrote %d RESPect CCEP run records to %s", len(metadata_df), self._pyhealth_csv)
