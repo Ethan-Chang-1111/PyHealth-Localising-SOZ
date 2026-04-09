@@ -1,7 +1,7 @@
 version: "1.0"
 tables:
   respectccep:
-    file_path: "respect_ccep_metadata-pyhealth.csv"
+    file_path: "respect_ccep_data-pyhealth.csv"
     patient_id: "participant_id"
     timestamp: null
     attributes:
@@ -9,12 +9,11 @@ tables:
       - "run_id"
       - "age"
       - "sex"
-      - "participant_session"
-      - "events_file_path"
-      - "channels_file_path"
-      - "electrodes_file_path"
-      - "coordsystem_file_path"
-      - "vhdr_file_path"
-      - "vmrk_file_path"
-      - "eeg_file_path"
-      - "ieeg_json_file_path"
+      - "recording_electrode"
+      - "stim_1"
+      - "stim_2"
+      - "response_ts"
+      - "soz_label"
+      - "recording_x"
+      - "recording_y"
+      - "recording_z"
