@@ -60,7 +60,7 @@ class RESPectCCEPDataset(BaseDataset):
         """
         if config_path is None:
             logger.info("No config path provided, using default config")
-            config_path = Path(__file__).parent / "configs" / "respect_ccep.yaml"
+            config_path = str(Path(__file__).parent / "configs" / "respect_ccep.yaml")
 
         self.tmin_s = tmin_s
         self.tmax_s = tmax_s
