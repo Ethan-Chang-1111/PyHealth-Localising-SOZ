@@ -44,10 +44,10 @@ import polars as pl
 # Imports under test — adjust paths if your project layout differs.
 # ---------------------------------------------------------------------------
 # Dataset helpers are accessed via the class; we import the class directly.
-from pyhealth.datasets.respect_ccep import RESPectCCEPDataset  # noqa: E402
+from pyhealth.datasets.respectccep import RESPectCCEPDataset  # noqa: E402
 
 # Task + private helpers
-from pyhealth.tasks.soz_localisation import (  # noqa: E402
+from pyhealth.tasks.ccep_detect_soz_2 import (  # noqa: E402
     SeizureOnsetZoneLocalisation,
     _DIST_UNKNOWN,
     _DEFAULT_MIN_DISTANCE_MM,

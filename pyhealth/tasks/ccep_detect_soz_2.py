@@ -70,11 +70,11 @@ Usage
 import json
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, cast, DefaultDict, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from pyhealth.data import Patient
+from pyhealth.data import Event, Patient
 from pyhealth.tasks import BaseTask
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,10 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             One sample dict per labelled electrode with the keys listed in the
             class docstring.  Returns an empty list when no usable data exist.
         """
-        events = patient.get_events(event_type="respectccep")
+        events: List[Event] = cast(
+            List[Event],
+            patient.get_events(event_type="respectccep", return_df=False),
+        )
         if not events:
             logger.debug(
                 "Patient %s: no 'respectccep' events found.",
@@ -229,7 +232,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
 
         # stim_responses[rec_id][stim_site_key] = list of 1-D float32 arrays
         # stim_site_key is the canonical "E1-E2" label built from stim_1, stim_2.
-        stim_responses: Dict[str, Dict[str, List[np.ndarray]]] = defaultdict(
+        stim_responses: DefaultDict[str, DefaultDict[str, List[np.ndarray]]] = defaultdict(
             lambda: defaultdict(list)
         )
 
@@ -274,14 +277,16 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         for rec_id, meta in electrode_meta.items():
             soz_label: int = meta["soz_label"]
             rec_coords: Optional[Tuple[float, float, float]] = meta["coords"]
-            per_site = stim_responses.get(rec_id)
-
-            if not per_site:
+            if rec_id not in stim_responses:
                 logger.debug(
                     "Patient %s electrode %s: no inward SPES responses.",
                     patient.patient_id,
                     rec_id,
                 )
+                continue
+
+            per_site: DefaultDict[str, List[np.ndarray]] = stim_responses[rec_id]
+            if not per_site:
                 continue
 
             # ----------------------------------------------------------
@@ -343,7 +348,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
                 }
             )
 
-        n_soz = sum(s["soz_label"] for s in samples)
+        n_soz: int = sum(int(s["soz_label"]) for s in samples)
         logger.debug(
             "Patient %s: %d samples generated (%d SOZ, %d non-SOZ).",
             patient.patient_id,
