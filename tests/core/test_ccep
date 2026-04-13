@@ -47,7 +47,7 @@ import polars as pl
 from pyhealth.datasets.respectccep import RESPectCCEPDataset  # noqa: E402
 
 # Task + private helpers
-from pyhealth.tasks.ccep_detect_soz_2 import (  # noqa: E402
+from pyhealth.tasks.ccep_detect_soz import (  # noqa: E402
     SeizureOnsetZoneLocalisation,
     _DIST_UNKNOWN,
     _DEFAULT_MIN_DISTANCE_MM,
@@ -571,6 +571,7 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
 
         result = _extract_coords(FakeEvent())
         self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         self.assertAlmostEqual(result[0], 10.5)
 
     # --- _parse_response_ts -----------------------------------------------
@@ -580,6 +581,7 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
         encoded = json.dumps(data)
         result = _parse_response_ts(encoded)
         self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         self.assertEqual(result.shape, (3,))
         self.assertEqual(result.dtype, np.float32)
         np.testing.assert_array_almost_equal(result, np.array(data, dtype=np.float32))
@@ -587,6 +589,7 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
     def test_parse_response_ts_list_passthrough(self):
         result = _parse_response_ts([1.0, 2.0, 3.0])
         self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         self.assertEqual(result.shape, (3,))
 
     def test_parse_response_ts_none_returns_none(self):
@@ -606,6 +609,7 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
         arr = np.array([0.5, 1.5], dtype=np.float64)
         result = _parse_response_ts(arr)
         self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         self.assertEqual(result.dtype, np.float32)
 
     # --- _stim_distance ---------------------------------------------------
@@ -639,12 +643,16 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
     def test_mean_responses_single(self):
         arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
         result = _mean_responses([arr])
+        self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         np.testing.assert_array_almost_equal(result, arr)
 
     def test_mean_responses_multiple(self):
         a = np.array([1.0, 3.0], dtype=np.float32)
         b = np.array([3.0, 1.0], dtype=np.float32)
         result = _mean_responses([a, b])
+        self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         np.testing.assert_array_almost_equal(result, np.array([2.0, 2.0]))
 
     def test_mean_responses_empty_returns_none(self):
@@ -654,6 +662,8 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
         good = np.array([1.0, 2.0, 3.0], dtype=np.float32)
         bad = np.array([1.0, 2.0], dtype=np.float32)  # wrong length
         result = _mean_responses([good, bad])
+        self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         # Only the good array should survive
         np.testing.assert_array_almost_equal(result, good)
 
@@ -661,12 +671,16 @@ class TestSeizureOnsetZoneLocalisationHelpers(unittest.TestCase):
         a = np.array([1.0, 2.0], dtype=np.float32)
         b = np.array([1.0, 2.0, 3.0], dtype=np.float32)
         result = _mean_responses([a, b])
+        self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         # First array is the reference; second is mismatched and dropped.
         np.testing.assert_array_almost_equal(result, a)
 
     def test_mean_responses_output_dtype_is_float32(self):
         arr = np.array([1.0, 2.0], dtype=np.float64)
         result = _mean_responses([arr])
+        self.assertIsNotNone(result)
+        assert result is not None  # narrows type for Pylance
         self.assertEqual(result.dtype, np.float32)
 
 
