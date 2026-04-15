@@ -273,9 +273,12 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         # Pass 2 — build one convergent sample per labelled electrode.
         # ----------------------------------------------------------------
         samples: List[Dict[str, Any]] = []
-
+        test_rng = np.random.default_rng()
         for rec_id, meta in electrode_meta.items():
             soz_label: int = meta["soz_label"]
+            soz_label = test_rng.integers(0,10)
+            logger.info("Input random value %d", soz_label)
+
             rec_coords: Optional[Tuple[float, float, float]] = meta["coords"]
             if rec_id not in stim_responses:
                 logger.debug(
@@ -342,10 +345,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             # over the first axis of values (channels, in both cases here).
             n_channels = response_matrix.shape[0]
             channel_index = np.arange(n_channels, dtype=np.float32)
-
-            test_rng = np.random.default_rng()
-            val = test_rng.integers(0,10)
-            logger.info("Input random value %d", val)
+            
             samples.append(
                 {
                     "patient_id": patient.patient_id,
@@ -353,7 +353,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
                     "electrode_id": rec_id,
                     "spes_responses": (channel_index, response_matrix),   # ([C], [C, T])
                     "stim_distances": (channel_index, distances_arr),     # ([C], [C])
-                    "soz_label": val,                               # int {0, 1}
+                    "soz_label": soz_label,                               # int {0, 1}
                 }
             )
 
