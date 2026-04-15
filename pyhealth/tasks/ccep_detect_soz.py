@@ -345,7 +345,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
 
             test_rng = np.random.default_rng()
             val = test_rng.integers(0,2)
-
+            logger.info("Input random value %d", val)
             samples.append(
                 {
                     "patient_id": patient.patient_id,
