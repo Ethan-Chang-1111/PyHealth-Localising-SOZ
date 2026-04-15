@@ -344,7 +344,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             channel_index = np.arange(n_channels, dtype=np.float32)
 
             test_rng = np.random.default_rng()
-            test_rng.integers(0,2)
+            val = test_rng.integers(0,2)
 
             samples.append(
                 {
@@ -353,7 +353,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
                     "electrode_id": rec_id,
                     "spes_responses": (channel_index, response_matrix),   # ([C], [C, T])
                     "stim_distances": (channel_index, distances_arr),     # ([C], [C])
-                    "soz_label": test_rng,                               # int {0, 1}
+                    "soz_label": val,                               # int {0, 1}
                 }
             )
 
