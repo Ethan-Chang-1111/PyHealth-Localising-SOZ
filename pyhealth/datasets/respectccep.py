@@ -20,6 +20,29 @@ import pandas as pd
 
 from .base_dataset import BaseDataset
 
+# --- 1. PYHEALTH LABEL PROCESSOR PATCH ---
+import pyhealth.processors.label_processor as lp
+
+_original_fit = lp.FeatureProcessor.fit
+
+def _safe_fit(self, samples, field):
+    """Intercepts PyHealth's strict 2-class requirement for binary tasks."""
+    all_labels = set([sample[field] for sample in samples])
+    if len(all_labels) == 1 and all_labels.issubset({0, 1}):
+        self.label_vocab = {0: 0, 1: 1}
+        logger.warning(
+            "LabelProcessor Patch: Only found labels %s for field '%s'. "
+            "Forced binary vocab {0: 0, 1: 1}.", 
+            all_labels, field
+        )
+        return
+    _original_fit(self, samples, field)
+
+# Apply patch globally when this module is imported
+lp.FeatureProcessor.fit = _safe_fit
+# -----------------------------------------
+
+
 logger = logging.getLogger(__name__)
 
 

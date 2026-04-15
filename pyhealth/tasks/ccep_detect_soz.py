@@ -277,10 +277,10 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         # Pass 2 — build one convergent sample per labelled electrode.
         # ----------------------------------------------------------------
         samples: List[Dict[str, Any]] = []
-        test_rng = np.random.default_rng()
+        # test_rng = np.random.default_rng()
         for rec_id, meta in electrode_meta.items():
             soz_label: int = meta["soz_label"]
-            soz_label = test_rng.integers(0,10)
+            # soz_label = test_rng.integers(0,10)
             logger.info("Input random value %d", soz_label)
 
             rec_coords: Optional[Tuple[float, float, float]] = meta["coords"]
