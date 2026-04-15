@@ -344,7 +344,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             channel_index = np.arange(n_channels, dtype=np.float32)
 
             test_rng = np.random.default_rng()
-            val = test_rng.integers(0,2)
+            val = test_rng.integers(0,10)
             logger.info("Input random value %d", val)
             samples.append(
                 {
