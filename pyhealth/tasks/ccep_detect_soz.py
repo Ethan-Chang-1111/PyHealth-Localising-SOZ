@@ -239,7 +239,11 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         # coord_lookup[electrode_label] = (x, y, z) — built from recording-
         # side coordinates stored in events; used to estimate stim distances.
         coord_lookup: Dict[str, Tuple[float, float, float]] = {}
-
+        logger.info(
+            "Patient %s: Found %d events",
+            patient.patient_id,
+            len(events)
+        )
         for event in events:
             rec_id = str(event.recording_electrode)
             stim_1 = str(event.stim_1)
