@@ -337,14 +337,20 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             response_matrix = np.stack(channel_responses, axis=0).astype(np.float32)
             distances_arr = np.array(channel_distances, dtype=np.float32)
 
+            # TimeSeriesProcessor expects each timeseries field as a
+            # (timestamps, values) 2-tuple.  timestamps is a 1-D index array
+            # over the first axis of values (channels, in both cases here).
+            n_channels = response_matrix.shape[0]
+            channel_index = np.arange(n_channels, dtype=np.float32)
+
             samples.append(
                 {
                     "patient_id": patient.patient_id,
                     "visit_id": meta["visit_id"],
                     "electrode_id": rec_id,
-                    "spes_responses": response_matrix,   # [C, T] float32
-                    "stim_distances": distances_arr,     # [C]    float32
-                    "soz_label": soz_label,              # int {0, 1}
+                    "spes_responses": (channel_index, response_matrix),   # ([C], [C, T])
+                    "stim_distances": (channel_index, distances_arr),     # ([C], [C])
+                    "soz_label": soz_label,                               # int {0, 1}
                 }
             )
 
