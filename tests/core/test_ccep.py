@@ -93,7 +93,12 @@ def _make_event_rows(
     ``Patient.__init__`` can sort and partition the data.
     """
     if not rows:
-        return pl.DataFrame()
+        return pl.DataFrame(
+            schema={
+                "event_type": pl.Utf8,
+                "timestamp": pl.Datetime,
+            }
+        )
 
     # Prefix every key that is not "timestamp" or "event_type".
     prefixed: List[Dict[str, Any]] = []
@@ -781,7 +786,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         patient = _make_patient(rows)
         samples = task(patient)
         self.assertEqual(len(samples), 1)
-        shape = samples[0]["spes_responses"].shape
+        _, values = samples[0]["spes_responses"]
+        shape = values.shape
         self.assertEqual(shape[0], 3, "Expected 3 input channels (one per stim site)")
         self.assertEqual(shape[1], _T)
 
@@ -801,28 +807,32 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         rows = [_row("P22", "P29", "P30")]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        self.assertEqual(sample["spes_responses"].dtype, np.float32)
+        _, values = sample["spes_responses"]
+        self.assertEqual(values.dtype, np.float32)
 
     def test_stim_distances_dtype_float32(self):
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
         rows = [_row("P22", "P29", "P30")]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        self.assertEqual(sample["stim_distances"].dtype, np.float32)
+        _, values = sample["stim_distances"]
+        self.assertEqual(values.dtype, np.float32)
 
     def test_spes_responses_is_2d(self):
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
         rows = [_row("P22", "P29", "P30")]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        self.assertEqual(sample["spes_responses"].ndim, 2)
+        _, values = sample["spes_responses"]
+        self.assertEqual(values.ndim, 2)
 
     def test_stim_distances_is_1d(self):
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
         rows = [_row("P22", "P29", "P30")]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        self.assertEqual(sample["stim_distances"].ndim, 1)
+        _, values = sample["stim_distances"]
+        self.assertEqual(values.ndim, 1)
 
     def test_channel_and_distance_dimensions_match(self):
         """C dim of spes_responses must equal length of stim_distances."""
@@ -833,9 +843,11 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         ]
         patient = _make_patient(rows)
         sample = task(patient)[0]
+        _, response_values = sample["spes_responses"]
+        _, distance_values = sample["stim_distances"]
         self.assertEqual(
-            sample["spes_responses"].shape[0],
-            sample["stim_distances"].shape[0],
+            response_values.shape[0],
+            distance_values.shape[0],
         )
 
     def test_visit_id_populated_from_session(self):
@@ -903,7 +915,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         patient = _make_patient(rows)
         samples = task(patient)
         self.assertEqual(len(samples), 1)
-        self.assertEqual(samples[0]["spes_responses"].shape[0], 1)
+        _, values = samples[0]["spes_responses"]
+        self.assertEqual(values.shape[0], 1)
 
     def test_distance_filter_unknown_coords_includes_site(self):
         """NaN coordinates → distance unknown → site is always included."""
@@ -926,7 +939,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         ]
         patient = _make_patient(rows)
         samples = task(patient)
-        self.assertEqual(samples[0]["stim_distances"][0], 0.0)
+        _, values = samples[0]["stim_distances"]
+        self.assertEqual(values[0], 0.0)
 
     # ---- stim key canonicalisation --------------------------------------
 
@@ -941,7 +955,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         samples = task(patient)
         self.assertEqual(len(samples), 1)
         # Two responses for the same canonical key → averaged → still 1 channel
-        self.assertEqual(samples[0]["spes_responses"].shape[0], 1)
+        _, values = samples[0]["spes_responses"]
+        self.assertEqual(values.shape[0], 1)
 
     # ---- response timeseries handling -----------------------------------
 
@@ -957,7 +972,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         samples = task(patient)
         self.assertEqual(len(samples), 1)
         # Only row1's stim site contributes → C=1
-        self.assertEqual(samples[0]["spes_responses"].shape[0], 1)
+        _, values = samples[0]["spes_responses"]
+        self.assertEqual(values.shape[0], 1)
 
     def test_timeseries_length_preserved(self):
         """T dimension of spes_responses must equal the serialised timeseries length."""
@@ -965,7 +981,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         rows = [_row("P22", "P29", "P30", response_seed=7)]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        self.assertEqual(sample["spes_responses"].shape[1], _T)
+        _, values = sample["spes_responses"]
+        self.assertEqual(values.shape[1], _T)
 
     # ---- class balance tracking -----------------------------------------
 
@@ -1009,8 +1026,10 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         ]
         patient_b = _make_patient(rows_b, patient_id="sub-02")
 
-        c_a = task(patient_a)[0]["spes_responses"].shape[0]
-        c_b = task(patient_b)[0]["spes_responses"].shape[0]
+        _, values_a = task(patient_a)[0]["spes_responses"]
+        _, values_b = task(patient_b)[0]["spes_responses"]
+        c_a = values_a.shape[0]
+        c_b = values_b.shape[0]
         self.assertNotEqual(c_a, c_b,
                             "C should differ between patients with different channel counts")
         self.assertEqual(c_a, 1)
