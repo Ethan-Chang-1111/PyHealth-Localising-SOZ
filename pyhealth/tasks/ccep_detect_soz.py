@@ -59,8 +59,8 @@ Usage
     'patient_id':    'sub-01',
     'visit_id':      'ses-1',
     'electrode_id':  'P22',
-    'spes_responses': array([[...]], dtype=float32),  # shape [C, T]
-    'stim_distances': array([...], dtype=float32),    # shape [C]
+    'spes_responses': (array([0., 1., ..., C-1.]), array([[...]], dtype=float32)),
+    'stim_distances': (array([0., 1., ..., C-1.]), array([...], dtype=float32)),
     'soz_label':     0,
 }
 >>> train_ds, val_ds, test_ds = split_by_patient(samples, [0.8, 0.1, 0.1])
@@ -139,21 +139,17 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         session is absent from the metadata.
     electrode_id : str
         Recording electrode label (e.g. ``"P22"``).
-    spes_responses : np.ndarray, shape ``[C, T]``, dtype float32
-        Stacked trial-averaged CCEP matrix.  ``C`` is the number of
-        stimulation sites that passed the distance filter; ``T`` is the
-        number of time points in each resampled epoch (determined by the
-        dataset's ``tmin_s``, ``tmax_s``, and ``resample_hz`` parameters).
-        **C varies across patients and electrodes** — models must handle
-        variable-length channel axes (e.g. via cross-channel attention or
-        random subsampling).
-    stim_distances : np.ndarray, shape ``[C]``, dtype float32
-        Euclidean distance (mm) from each stimulation site to the target
-        recording electrode.  Rows correspond to the same stimulation sites as
-        the rows of ``spes_responses``.  Entries are ``0.0`` when spatial
-        coordinates were unavailable.  This vector is useful as an auxiliary
-        feature for spatially-aware models (cf. the modified CNN Transformer
-        with AUROC 0.745 reported in §4.7 of Norris et al. 2024).
+    spes_responses : Tuple[np.ndarray, np.ndarray] — ``(channel_index, data)``
+        ``channel_index`` is a float32 arange of shape ``[C]``.
+        ``data`` is the stacked trial-averaged CCEP matrix of shape ``[C, T]``,
+        dtype float32.  ``C`` is the number of stimulation sites that passed
+        the distance filter; ``T`` is the number of time points in each
+        resampled epoch.  **C varies across patients and electrodes.**
+    stim_distances : Tuple[np.ndarray, np.ndarray] — ``(channel_index, data)``
+        ``channel_index`` is the same float32 arange of shape ``[C]``.
+        ``data`` is the Euclidean distance (mm) array of shape ``[C]``,
+        dtype float32, one entry per stimulation site.  Entries are ``0.0``
+        when spatial coordinates were unavailable.
     soz_label : int
         Binary SOZ membership label: ``1`` if the electrode is within the
         clinician-defined Seizure Onset Zone, ``0`` otherwise.
@@ -239,11 +235,6 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         # coord_lookup[electrode_label] = (x, y, z) — built from recording-
         # side coordinates stored in events; used to estimate stim distances.
         coord_lookup: Dict[str, Tuple[float, float, float]] = {}
-        logger.info(
-            "Patient %s: Found %d events",
-            patient.patient_id,
-            len(events)
-        )
         for event in events:
             rec_id = str(event.recording_electrode)
             stim_1 = str(event.stim_1)
@@ -277,12 +268,8 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         # Pass 2 — build one convergent sample per labelled electrode.
         # ----------------------------------------------------------------
         samples: List[Dict[str, Any]] = []
-        test_rng = np.random.default_rng()
         for rec_id, meta in electrode_meta.items():
             soz_label: int = meta["soz_label"]
-            # soz_label = test_rng.integers(0,2)
-            logger.info("Sample has label %d", soz_label)
-
             rec_coords: Optional[Tuple[float, float, float]] = meta["coords"]
             if rec_id not in stim_responses:
                 logger.debug(
@@ -349,7 +336,6 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             # over the first axis of values (channels, in both cases here).
             n_channels = response_matrix.shape[0]
             channel_index = np.arange(n_channels, dtype=np.float32)
-            
             samples.append(
                 {
                     "patient_id": patient.patient_id,
@@ -369,6 +355,19 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             n_soz,
             len(samples) - n_soz,
         )
+
+        # Guard: if this patient has no SOZ-positive electrodes they cannot
+        # contribute a positive label to the global label pool.  Including
+        # them would cause BinaryLabelProcessor to raise ValueError when it
+        # sees only {0} across the whole dataset.  This matches the paper's
+        # restriction to the 35 / 74 patients with SOZ annotations.
+        # if n_soz == 0:
+        #     logger.debug(
+        #         "Patient %s: skipping — no SOZ-positive electrodes found.",
+        #         patient.patient_id,
+        #     )
+        #     return []
+
         return samples
 
 

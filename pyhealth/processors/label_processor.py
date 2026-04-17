@@ -22,7 +22,7 @@ class BinaryLabelProcessor(FeatureProcessor):
     def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
         all_labels = set([sample[field] for sample in samples])
         if len(all_labels) != 2:
-            raise ValueError(f"Expected 2 unique labels, got {len(all_labels)}, containing {all_labels}")
+            raise ValueError(f"Expected 2 unique labels, got {len(all_labels)}")
         if all_labels == {0, 1}:
             self.label_vocab = {0: 0, 1: 1}
         elif all_labels == {False, True}:
