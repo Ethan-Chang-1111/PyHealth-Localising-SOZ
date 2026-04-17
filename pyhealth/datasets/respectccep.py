@@ -3,11 +3,18 @@
 Dataset link:
     https://openneuro.org/datasets/ds004080
 
-This dataset implementation builds a table with one row per
-recording-electrode / stimulation-pair entry and stores:
-    - mean evoked response timeseries
-    - recording electrode coordinates
-    - SOZ label and participant demographics
+This loader scans a BIDS-style RESPect CCEP directory, extracts one
+trial-averaged response per ``(recording_electrode, stimulation_pair)``,
+and writes a compact metadata CSV for ``BaseDataset``. Each output row stores:
+
+- the mean evoked response timeseries for one recording electrode
+- the recording electrode coordinates
+- the SOZ label and participant demographics
+
+Example:
+    >>> from pyhealth.datasets import RESPectCCEPDataset
+    >>> dataset = RESPectCCEPDataset(root="/path/to/ds004080")
+    >>> dataset.stats()
 """
 
 import json
@@ -19,7 +26,48 @@ import numpy as np
 import pandas as pd
 
 from .base_dataset import BaseDataset
+
+import pyhealth.processors.label_processor as lp
+
+_original_fit = lp.FeatureProcessor.fit
+
 logger = logging.getLogger(__name__)
+
+
+def _safe_fit(
+    self: Any,
+    samples: List[Dict[str, Any]],
+    field: str,
+) -> None:
+    """Fit PyHealth's binary label processor with single-class safety.
+
+    PyHealth's default binary processor expects both classes to be present
+    during fitting. Small synthetic or single-patient RESPect CCEP subsets can
+    legitimately contain only one label. In that case, force a binary vocab so
+    downstream task setup still succeeds.
+
+    Args:
+        self: The processor instance being fitted.
+        samples: Raw sample dictionaries produced by a task.
+        field: Label field name to inspect.
+    """
+    all_labels = {sample[field] for sample in samples}
+    if len(all_labels) == 1 and all_labels.issubset({0, 1}):
+        self.label_vocab = {0: 0, 1: 1}
+        logger.warning(
+            "Only found labels %s for field '%s'; forcing binary vocab "
+            "{0: 0, 1: 1}.",
+            all_labels,
+            field,
+        )
+        return
+    _original_fit(self, samples, field)
+
+
+def _ensure_binary_label_patch() -> None:
+    """Install the single-class binary-label workaround exactly once."""
+    if lp.FeatureProcessor.fit is not _safe_fit:
+        lp.FeatureProcessor.fit = _safe_fit
 
 
 class RESPectCCEPDataset(BaseDataset):
@@ -28,6 +76,11 @@ class RESPectCCEPDataset(BaseDataset):
     The output CSV is ``respect_ccep_data-pyhealth.csv``.
     Each row corresponds to a recording electrode's evoked response to a
     stimulation pair, forming the unit of prediction for SOZ classification.
+
+    Example:
+        >>> from pyhealth.datasets import RESPectCCEPDataset
+        >>> dataset = RESPectCCEPDataset(root="/path/to/ds004080")
+        >>> dataset.stats()
     """
 
     def __init__(
@@ -46,8 +99,10 @@ class RESPectCCEPDataset(BaseDataset):
         """Initialize RESPect CCEP dataset.
 
         Args:
-            root: Root directory containing ``participants.tsv`` and ``sub-*`` folders.
-            dataset_name: Optional custom dataset name. Defaults to ``"respect_ccep"``.
+            root: Root directory containing ``participants.tsv`` and ``sub-*``
+                folders.
+            dataset_name: Optional custom dataset name. Defaults to
+                ``"respect_ccep"``.
             config_path: Optional path to YAML config file.
             tmin_s: Epoch start (seconds, post-stimulus) after cropping.
             tmax_s: Epoch end (seconds, post-stimulus) after cropping.
@@ -56,10 +111,36 @@ class RESPectCCEPDataset(BaseDataset):
             resample_hz: Target sampling frequency for extracted epochs.
             min_trials: Minimum valid trials required for a stimulation pair.
             **kwargs: Forwarded to ``BaseDataset``.
+
+        Raises:
+            ValueError: If preprocessing arguments are inconsistent.
         """
         if config_path is None:
             logger.info("No config path provided, using default config")
             config_path = str(Path(__file__).parent / "configs" / "respect_ccep.yaml")
+
+        if tmin_s >= tmax_s:
+            raise ValueError(
+                f"Expected tmin_s < tmax_s, got {tmin_s} and {tmax_s}."
+            )
+        if filter_low_hz < 0 or filter_high_hz <= 0:
+            raise ValueError(
+                "Expected non-negative filter_low_hz and positive "
+                f"filter_high_hz, got {filter_low_hz} and {filter_high_hz}."
+            )
+        if filter_low_hz >= filter_high_hz:
+            raise ValueError(
+                "Expected filter_low_hz < filter_high_hz, got "
+                f"{filter_low_hz} and {filter_high_hz}."
+            )
+        if resample_hz <= 0:
+            raise ValueError(
+                f"Expected resample_hz > 0, got {resample_hz}."
+            )
+        if min_trials < 1:
+            raise ValueError(f"Expected min_trials >= 1, got {min_trials}.")
+
+        _ensure_binary_label_patch()
 
         self.tmin_s = tmin_s
         self.tmax_s = tmax_s
@@ -116,7 +197,9 @@ class RESPectCCEPDataset(BaseDataset):
         Returns:
             Matching file path if present; otherwise ``None``.
         """
-        expected = events_path.with_name(events_path.name.replace("_events.tsv", suffix))
+        expected = events_path.with_name(
+            events_path.name.replace("_events.tsv", suffix)
+        )
         if expected.exists():
             return expected
         return None
@@ -153,7 +236,15 @@ class RESPectCCEPDataset(BaseDataset):
 
     @staticmethod
     def _resolve_annex_pointer(path: Path) -> Path:
-        """Resolve git-annex pointer files when needed."""
+        """Resolve a git-annex pointer file when needed.
+
+        Args:
+            path: Candidate file path.
+
+        Returns:
+            The resolved annex target if the file is a valid pointer;
+            otherwise the original path.
+        """
         if not path.exists():
             return path
         try:
@@ -169,7 +260,14 @@ class RESPectCCEPDataset(BaseDataset):
 
     @staticmethod
     def _safe_float(value: Any) -> float:
-        """Convert value to float; return ``nan`` on failure."""
+        """Convert a value to float.
+
+        Args:
+            value: Input value to convert.
+
+        Returns:
+            Parsed float value, or ``nan`` if conversion fails.
+        """
         try:
             return float(value)
         except Exception:
@@ -177,7 +275,15 @@ class RESPectCCEPDataset(BaseDataset):
 
     @staticmethod
     def _is_overlap(event_row: pd.Series, other_row: pd.Series) -> bool:
-        """Check interval overlap using ``sample_start``/``sample_end`` fields."""
+        """Check interval overlap using ``sample_start`` and ``sample_end``.
+
+        Args:
+            event_row: First interval row.
+            other_row: Second interval row.
+
+        Returns:
+            ``True`` if the half-open intervals overlap, else ``False``.
+        """
         return (
             RESPectCCEPDataset._safe_float(event_row["sample_start"])
             < RESPectCCEPDataset._safe_float(other_row["sample_end"])
@@ -187,7 +293,14 @@ class RESPectCCEPDataset(BaseDataset):
 
     @staticmethod
     def _canonical_stim_site(site: Any) -> Optional[str]:
-        """Canonicalize stimulation pair labels (sorted ``E1-E2`` form)."""
+        """Canonicalize a stimulation pair label.
+
+        Args:
+            site: Raw stimulation-site string.
+
+        Returns:
+            A sorted ``"E1-E2"`` label, or ``None`` if parsing fails.
+        """
         if not isinstance(site, str):
             return None
         parts = [p.strip() for p in site.split("-") if p.strip()]
@@ -197,8 +310,19 @@ class RESPectCCEPDataset(BaseDataset):
         return f"{parts[0]}-{parts[1]}"
 
     @staticmethod
-    def _coord_tuple(electrodes_df: pd.DataFrame, channel_name: str) -> Tuple[float, float, float]:
-        """Fetch channel coordinates from ``electrodes.tsv``-like dataframe."""
+    def _coord_tuple(
+        electrodes_df: pd.DataFrame,
+        channel_name: str,
+    ) -> Tuple[float, float, float]:
+        """Fetch channel coordinates from an ``electrodes.tsv``-like table.
+
+        Args:
+            electrodes_df: Electrode metadata dataframe.
+            channel_name: Recording electrode name.
+
+        Returns:
+            A ``(x, y, z)`` tuple. Missing coordinates are returned as ``nan``.
+        """
         row = electrodes_df[electrodes_df["name"] == channel_name]
         if row.empty:
             return (float("nan"), float("nan"), float("nan"))
@@ -210,13 +334,27 @@ class RESPectCCEPDataset(BaseDataset):
 
     @staticmethod
     def _to_json_1d(arr: np.ndarray) -> str:
-        """Serialize a 1D numeric response vector to compact JSON."""
+        """Serialize a 1D numeric response vector to compact JSON.
+
+        Args:
+            arr: Response vector to serialize.
+
+        Returns:
+            Compact JSON string with float32 values.
+        """
         return json.dumps(arr.astype(np.float32).tolist(), separators=(",", ":"))
 
     def _participant_maps(
         self, participants_df: pd.DataFrame
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[Tuple[str, str], Dict[str, Any]]]:
-        """Build participant-level and participant-session-level lookup maps."""
+        """Build participant-level and session-level demographics maps.
+
+        Args:
+            participants_df: Parsed ``participants.tsv`` dataframe.
+
+        Returns:
+            Tuple of ``(by_participant, by_participant_session)`` lookup maps.
+        """
         by_participant = (
             participants_df.drop_duplicates(subset=["participant_id"], keep="first")
             .set_index("participant_id")
@@ -225,7 +363,10 @@ class RESPectCCEPDataset(BaseDataset):
         by_participant_session: Dict[Tuple[str, str], Dict[str, Any]] = {}
         if "session" in participants_df.columns:
             by_participant_session = (
-                participants_df.drop_duplicates(subset=["participant_id", "session"], keep="first")
+                participants_df.drop_duplicates(
+                    subset=["participant_id", "session"],
+                    keep="first",
+                )
                 .set_index(["participant_id", "session"])
                 .to_dict(orient="index")
             )
@@ -286,15 +427,27 @@ class RESPectCCEPDataset(BaseDataset):
         if "name" not in channels_df.columns:
             logger.warning("channels.tsv missing `name` column for %s", events_path)
             return rows
+        if "name" not in electrodes_df.columns:
+            logger.warning("electrodes.tsv missing `name` column for %s", events_path)
+            return rows
 
         channels_df["name"] = channels_df["name"].astype(str)
         if "status_description" in channels_df.columns:
-            include_mask = channels_df["status_description"].astype(str).str.lower().eq("included")
+            include_mask = (
+                channels_df["status_description"]
+                .astype(str)
+                .str.lower()
+                .eq("included")
+            )
         elif "status" in channels_df.columns:
             include_mask = channels_df["status"].astype(str).str.lower().eq("good")
         else:
             include_mask = pd.Series([True] * len(channels_df), index=channels_df.index)
-        chans_to_use = [c for c in channels_df.loc[include_mask, "name"].tolist() if c in raw.ch_names]
+        chans_to_use = [
+            channel
+            for channel in channels_df.loc[include_mask, "name"].tolist()
+            if channel in raw.ch_names
+        ]
         if len(chans_to_use) < 3:
             return rows
 
@@ -318,16 +471,32 @@ class RESPectCCEPDataset(BaseDataset):
             logger.warning("events.tsv missing required columns for %s", events_path)
             return rows
 
-        events_df["sample_start"] = pd.to_numeric(events_df["sample_start"], errors="coerce")
-        events_df["sample_end"] = pd.to_numeric(events_df["sample_end"], errors="coerce")
+        events_df["sample_start"] = pd.to_numeric(
+            events_df["sample_start"],
+            errors="coerce",
+        )
+        events_df["sample_end"] = pd.to_numeric(
+            events_df["sample_end"],
+            errors="coerce",
+        )
 
         stim_events = events_df[
-            events_df["trial_type"].astype(str).isin(["electrical_stimulation", "stimulation"])
+            events_df["trial_type"]
+            .astype(str)
+            .isin(["electrical_stimulation", "stimulation"])
         ].copy()
-        stim_events = stim_events.dropna(subset=["sample_start", "sample_end", "electrical_stimulation_site"])
+        stim_events = stim_events.dropna(
+            subset=[
+                "sample_start",
+                "sample_end",
+                "electrical_stimulation_site",
+            ]
+        )
         stim_events = stim_events[stim_events["sample_start"] < raw.n_times]
-        stim_events["electrical_stimulation_site"] = stim_events["electrical_stimulation_site"].apply(
-            self._canonical_stim_site
+        stim_events["electrical_stimulation_site"] = (
+            stim_events["electrical_stimulation_site"].apply(
+                self._canonical_stim_site
+            )
         )
         stim_events = stim_events.dropna(subset=["electrical_stimulation_site"])
         if stim_events.empty:
@@ -346,10 +515,12 @@ class RESPectCCEPDataset(BaseDataset):
         valid_rows: List[int] = []
         for idx, stim_row in stim_events.iterrows():
             overlaps_global_art = any(
-                self._is_overlap(stim_row, art_row) for _, art_row in artefacts_all.iterrows()
+                self._is_overlap(stim_row, art_row)
+                for _, art_row in artefacts_all.iterrows()
             )
             overlaps_seizure = any(
-                self._is_overlap(stim_row, sei_row) for _, sei_row in seizures.iterrows()
+                self._is_overlap(stim_row, sei_row)
+                for _, sei_row in seizures.iterrows()
             )
             if not overlaps_global_art and not overlaps_seizure:
                 valid_rows.append(idx)
@@ -407,7 +578,12 @@ class RESPectCCEPDataset(BaseDataset):
                 epochs.crop(tmin=crop_tmin, tmax=crop_tmax)
                 epochs.resample(self.resample_hz, verbose=False)
             except Exception as exc:
-                logger.debug("Epoch extraction failed for %s %s: %s", participant_id, stim_site, exc)
+                logger.debug(
+                    "Epoch extraction failed for %s %s: %s",
+                    participant_id,
+                    stim_site,
+                    exc,
+                )
                 continue
 
             if len(epochs) < self.min_trials:
@@ -422,7 +598,9 @@ class RESPectCCEPDataset(BaseDataset):
                 rec_row = electrodes_df[electrodes_df["name"] == rec_chan]
                 soz_label = 0
                 if not rec_row.empty:
-                    soz_label = int(str(rec_row.iloc[0].get("soz", "no")).lower() == "yes")
+                    soz_label = int(
+                        str(rec_row.iloc[0].get("soz", "no")).lower() == "yes"
+                    )
 
                 # Keep only the mean response per channel as the canonical feature row.
                 rows.append(
@@ -450,6 +628,11 @@ class RESPectCCEPDataset(BaseDataset):
 
         Args:
             root: Dataset root containing ``participants.tsv`` and ``sub-*`` folders.
+
+        Raises:
+            FileNotFoundError: If the dataset root or ``participants.tsv`` is
+                missing.
+            ValueError: If ``participants.tsv`` lacks ``participant_id``.
         """
         root_path = Path(root)
         if not root_path.exists():
@@ -483,7 +666,12 @@ class RESPectCCEPDataset(BaseDataset):
 
             demographics = by_participant.get(participant_id, {}).copy()
             if session_id is not None:
-                demographics.update(by_participant_session.get((participant_id, session_id), {}))
+                demographics.update(
+                    by_participant_session.get(
+                        (participant_id, session_id),
+                        {},
+                    )
+                )
 
             run_rows = self._process_run(
                 participant_id=participant_id,
