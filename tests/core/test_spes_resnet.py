@@ -10,12 +10,13 @@ class TestSPESResNet(unittest.TestCase):
 
     def setUp(self):
         """Set up test data and model."""
-        # Create minimal synthetic data: [C, 2, T+1] where T=155 so T+1=156
+        torch.manual_seed(7)
+        # Create minimal synthetic data: [C, 2, T+1].
+        # MSResNet uses fixed pooling kernels, so T must be sufficiently long.
         # Distances are at index 0 of the time dimension.
         # We give one sample 5 channels and another 3 channels to test padding.
-        
-        sample0_tensor = torch.randn(5, 2, 156)
-        sample1_tensor = torch.randn(3, 2, 156)
+        sample0_tensor = torch.randn(5, 2, 509)
+        sample1_tensor = torch.randn(3, 2, 509)
         
         # Inject positive distances so valid channels are identified
         sample0_tensor[:, 0, 0] = torch.abs(torch.randn(5)) + 1.0
@@ -96,12 +97,42 @@ class TestSPESResNet(unittest.TestCase):
         )
         self.assertTrue(has_gradient, "No parameters have gradients after backward pass")
 
+    def test_output_probabilities_in_range(self):
+        """Test that predicted probabilities are bounded in [0, 1]."""
+        train_loader = get_dataloader(self.dataset, batch_size=2, shuffle=False)
+        data_batch = next(iter(train_loader))
+        with torch.no_grad():
+            ret = self.model(**data_batch)
+        self.assertTrue(torch.all(ret["y_prob"] >= 0.0))
+        self.assertTrue(torch.all(ret["y_prob"] <= 1.0))
+
+    def test_missing_spes_responses_raises_error(self):
+        """Test that missing model feature input raises an error."""
+        with self.assertRaises((KeyError, ValueError, TypeError)):
+            self.model(soz_label=torch.tensor([0, 1]))
+
+    def test_repeated_eval_forward_outputs_are_finite(self):
+        """Test repeated eval forwards produce finite values with valid shapes."""
+        train_loader = get_dataloader(self.dataset, batch_size=2, shuffle=False)
+        data_batch = next(iter(train_loader))
+        self.model.eval()
+        with torch.no_grad():
+            ret1 = self.model(**data_batch)
+            ret2 = self.model(**data_batch)
+        self.assertEqual(ret1["logit"].shape, ret2["logit"].shape)
+        self.assertTrue(torch.isfinite(ret1["logit"]).all())
+        self.assertTrue(torch.isfinite(ret2["logit"]).all())
+        self.assertTrue(torch.isfinite(ret1["y_prob"]).all())
+        self.assertTrue(torch.isfinite(ret2["y_prob"]).all())
+
     def test_empty_distances_fallback(self):
         """Test the fallback mechanism when distances are missing (all zeros)."""
         # Create data with zero distances to ensure the std-based fallback trigger works.
-        sample0_tensor = torch.randn(5, 2, 156)
+        sample0_tensor = torch.randn(5, 2, 509)
+        sample1_tensor = torch.randn(4, 2, 509)
         # Clear distances
         sample0_tensor[:, 0, 0] = 0.0
+        sample1_tensor[:, 0, 0] = 0.0
         
         samples = [
             {
@@ -109,6 +140,12 @@ class TestSPESResNet(unittest.TestCase):
                 "visit_id": "visit-0",
                 "spes_responses": sample0_tensor.tolist(),
                 "soz_label": 1,
+            },
+            {
+                "patient_id": "patient-1",
+                "visit_id": "visit-1",
+                "spes_responses": sample1_tensor.tolist(),
+                "soz_label": 0,
             }
         ]
         dataset = create_sample_dataset(
@@ -118,13 +155,13 @@ class TestSPESResNet(unittest.TestCase):
             dataset_name="test_spes_empty",
         )
         model = SPESResNet(dataset=dataset, input_channels=2)
-        train_loader = get_dataloader(dataset, batch_size=1, shuffle=True)
+        train_loader = get_dataloader(dataset, batch_size=2, shuffle=True)
         data_batch = next(iter(train_loader))
 
         with torch.no_grad():
             ret = model(**data_batch)
             
-        self.assertEqual(ret["logit"].shape[0], 1)
+        self.assertEqual(ret["logit"].shape[0], 2)
 
 
 if __name__ == "__main__":

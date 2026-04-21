@@ -809,7 +809,7 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         rows = [_row("P22", "P29", "P30")]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        _, values = sample["spes_responses"]
+        values = sample["spes_responses"]
         self.assertEqual(values.dtype, np.float32)
 
     def test_spes_responses_is_3d(self):
