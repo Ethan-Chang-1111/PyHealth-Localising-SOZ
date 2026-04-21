@@ -277,26 +277,28 @@ class SPESResNet(BaseModel):
     It takes fixed multi-channel input (via multinomial sampling over valid channels)
     and processes it through a Multi-Scale ResNet (MSResNet) architecture.
     """
-
     def __init__(
         self,
         dataset,
-        feature_keys=["spes_responses"],
-        label_key="soz_label",
-        mode="binary",
+        feature_keys=None,
+        label_key=None,
+        mode=None,
         input_channels=40,
         noise_std=0.1,
+        include_distance=False,
         **kwargs
     ):
         super(SPESResNet, self).__init__(
             dataset=dataset,
-            feature_keys=feature_keys,
-            label_key=label_key,
-            mode=mode,
-            **kwargs,
         )
+        self.feature_keys = feature_keys or ["spes_responses"]
+        self.label_key = label_key or "soz_label"
+        if mode is not None:
+            self.mode = mode
+            
         self.input_channels = input_channels
         self.noise_std = noise_std
+        self.include_distance = include_distance
         self.noise = RandomNoise(std=self.noise_std)  # Random noise transformer
         
         # Binary classification -> num_classes = 1 (outputting a single logit per sample)
@@ -352,7 +354,12 @@ class SPESResNet(BaseModel):
             random_channels = valid_rows[idx]
             random_channels = random_channels.sort()[0]
             
-            all_x.append(single_sample[0, random_channels, 1:])
+            if self.include_distance:
+                # Include distance (index 0) and the rest of the time series
+                all_x.append(single_sample[0, random_channels, :])
+            else:
+                # Original logic: exclude the spatial distance entirely
+                all_x.append(single_sample[0, random_channels, 1:])
 
         # Stack processed samples and pass them through the MSResNet and the final FC layer.
         processed_x = torch.stack(all_x, dim=0)

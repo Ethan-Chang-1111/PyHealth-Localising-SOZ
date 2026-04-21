@@ -64,14 +64,20 @@ class SPESResponseEncoder(nn.Module):
         self.mlp_embedding = mlp_embedding
         self.random_channels = random_channels
         self.noise_std = noise_std
+        self.include_distance = include_distance
+        
+        self.noise = RandomNoise(std=self.noise_std)
+
+        # Distances are optionally stripped (1 padding unit reduction)
+        offset = 0 if self.include_distance else 1
 
         if conv_embedding:
             input_channels = self.mean + self.std
             self.msresnet = MSResNet(input_channel=input_channels, num_classes=1)
             # MSResNet output size is 768
-            embedding_in = 768 + (self.mean + self.std) * 155 * mlp_embedding
+            embedding_in = 768 + (self.mean + self.std) * (155 - offset) * mlp_embedding
         else:
-            embedding_in = (self.mean + self.std) * 509
+            embedding_in = (self.mean + self.std) * (509 - offset)
 
         self.patch_to_embedding = nn.Linear(embedding_in, embedding_dim)
 
@@ -86,8 +92,6 @@ class SPESResponseEncoder(nn.Module):
             batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.noise = RandomNoise(std=self.noise_std)
 
     def forward(self, x):
         """
@@ -167,6 +171,7 @@ class SPESResponseEncoder(nn.Module):
         Args:
             x (torch.Tensor): [batch_size, modes, chans, timesteps]
         """
+        start_idx = 0 if self.include_distance else 1
         if self.conv_embedding:
             if self.mean:
                 if self.std:
@@ -185,21 +190,21 @@ class SPESResponseEncoder(nn.Module):
             if self.mlp_embedding:
                 if self.mean:
                     if self.std:
-                        all_output = torch.cat([x[:, 0, :, :155], x[:, 1, :, :155], late_output], dim=-1)
+                        all_output = torch.cat([x[:, 0, :, start_idx:155], x[:, 1, :, start_idx:155], late_output], dim=-1)
                     else:
-                        all_output = torch.cat([x[:, 0, :, :155], late_output], dim=-1)
+                        all_output = torch.cat([x[:, 0, :, start_idx:155], late_output], dim=-1)
                 else:
-                    all_output = torch.cat([x[:, 1, :, :155], late_output], dim=-1)
+                    all_output = torch.cat([x[:, 1, :, start_idx:155], late_output], dim=-1)
             else:
                 all_output = late_output
         elif self.mlp_embedding:
             if self.mean:
                 if self.std:
-                    all_output = torch.cat([x[:, 0], x[:, 1]], dim=-1)
+                    all_output = torch.cat([x[:, 0, :, start_idx:], x[:, 1, :, start_idx:]], dim=-1)
                 else:
-                    all_output = x[:, 0]
+                    all_output = x[:, 0, :, start_idx:]
             else:
-                all_output = x[:, 1]
+                all_output = x[:, 1, :, start_idx:]
         
         return all_output
 
@@ -212,9 +217,9 @@ class SPESTransformer(BaseModel):
     def __init__(
         self,
         dataset,
-        feature_keys=["spes_responses"],
-        label_key="soz_label",
-        mode="binary",
+        feature_keys=None,
+        label_key=None,
+        mode=None,
         mean=True,
         std=True,
         conv_embedding=True,
@@ -223,16 +228,17 @@ class SPESTransformer(BaseModel):
         num_layers=2,
         embedding_dim=64,
         random_channels=None,
-        noise_std=0.1,
+        noise_std=0.0,
+        include_distance=True,
         **kwargs
     ):
         super(SPESTransformer, self).__init__(
             dataset=dataset,
-            feature_keys=feature_keys,
-            label_key=label_key,
-            mode=mode,
-            **kwargs,
         )
+        self.feature_keys = feature_keys or ["spes_responses"]
+        self.label_key = label_key or "soz_label"
+        if mode is not None:
+            self.mode = mode
         
         num_classes = 1
 
@@ -245,7 +251,8 @@ class SPESTransformer(BaseModel):
             num_layers=num_layers,
             embedding_dim=embedding_dim,
             random_channels=random_channels,
-            noise_std=noise_std
+            noise_std=noise_std,
+            include_distance=include_distance
         )
 
         self.fc = nn.Sequential(
