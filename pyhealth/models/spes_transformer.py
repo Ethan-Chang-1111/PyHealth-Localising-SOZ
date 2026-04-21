@@ -1,11 +1,11 @@
 """
-Contributor: Ethan Chang
-NetID: eango
+SPES CNN-Transformer model.
+
+Contributor: Sebastian Ho
+NetID: sho28
 Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
 Paper Link: https://proceedings.mlr.press/v252/norris24a.html
 Description: Convolutional-Transformer encoder model implementation for SPES Seizure Onset Zone Localisation.
-
-SPES CNN-Transformer model.
 
 Paper: Localising the Seizure Onset Zone from Single-Pulse Electrical 
 Stimulation Responses with a CNN Transformer (Norris et al. 2024).
@@ -288,7 +288,8 @@ class SPESTransformer(BaseModel):
             **kwargs: Contains 'spes_responses' tensor of shape [batch, max_C, 2, T+1]
         """
         # [batch_size, max_C, 2, T+1] -> [batch_size, 2, max_C, T+1]
-        x = kwargs["spes_responses"].transpose(1, 2)
+        input_x = kwargs["spes_responses"].to(self.device)
+        x = input_x.transpose(1, 2)
 
         features = self.encoder(x)
         logit = self.fc(features)
@@ -297,6 +298,8 @@ class SPESTransformer(BaseModel):
             logit = logit.squeeze(-1)
             
         y_true = kwargs.get(self.label_key)
+        if y_true is not None:
+            y_true = y_true.to(self.device)
         if self.mode == "binary" and y_true is not None and y_true.ndim > 1:
             y_true = y_true.squeeze(-1)
 

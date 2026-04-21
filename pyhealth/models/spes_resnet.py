@@ -1,8 +1,8 @@
 """
 SPES CNN baseline model (MSResNet).
 
-Contributor: 
-NetID: 
+Contributor: Sebastian Ho   
+NetID: sho28
 Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
 Paper Link: https://proceedings.mlr.press/v252/norris24a.html
 Description: Baseline MSResNet CNN model implementation for SPES Seizure Onset Zone Localisation.
@@ -257,6 +257,14 @@ class MSResNet(nn.Module):
         # z = self.layer7x7_4(z)
         z = self.maxpool7(z)
 
+        # Align temporal length across branches for robust concatenation.
+        # This avoids odd-length edge cases (e.g., 513 with distance included)
+        # where one branch can retain length 2 while others collapse to 1.
+        if x.shape[-1] != y.shape[-1] or y.shape[-1] != z.shape[-1]:
+            x = torch.nn.functional.adaptive_avg_pool1d(x, 1)
+            y = torch.nn.functional.adaptive_avg_pool1d(y, 1)
+            z = torch.nn.functional.adaptive_avg_pool1d(z, 1)
+
         out = torch.cat([x, y, z], dim=1)
 
         out = out[:, :, 0]#.squeeze()
@@ -319,8 +327,10 @@ class SPESResNet(BaseModel):
         Returns:
             Dictionary containing loss, probabilities, ground truth, and logits.
         """
+        # Ensure batch tensors are on the same device as model weights.
+        input_x = kwargs["spes_responses"].to(self.device)
         # [batch_size, max_C, 2, T+1] -> [batch_size, 2, max_C, T+1]
-        x = kwargs["spes_responses"].transpose(1, 2)
+        x = input_x.transpose(1, 2)
         
         # Extract distances from dim 0
         distances = x[:, 0, :, 0]
@@ -373,6 +383,8 @@ class SPESResNet(BaseModel):
             logit = logit.squeeze(-1)
             
         y_true = kwargs.get(self.label_key)
+        if y_true is not None:
+            y_true = y_true.to(self.device)
         if self.mode == "binary" and y_true is not None and y_true.ndim > 1:
             y_true = y_true.squeeze(-1)
         loss_fn = self.get_loss_function()

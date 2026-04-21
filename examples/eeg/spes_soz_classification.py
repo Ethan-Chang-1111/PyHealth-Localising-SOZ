@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from pyhealth.datasets import get_dataloader, split_by_patient
+import sklearn.metrics as sk_metrics
+from pyhealth.datasets import get_dataloader, split_by_patient, split_by_sample
 from pyhealth.datasets.respectccep import RESPectCCEPDataset
 from pyhealth.models import SPESResNet, SPESTransformer
 from pyhealth.tasks.ccep_detect_soz import SeizureOnsetZoneLocalisation
@@ -249,6 +250,41 @@ def _build_task_dataset_from_root(
     return base_dataset.set_task(task)
 
 
+def _compute_paper_metrics(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    threshold: float = 0.5,
+) -> Dict[str, float]:
+    """Compute paper-aligned binary metrics from predictions.
+
+    Metrics:
+    - AUROC
+    - AUPRC
+    - sensitivity (recall)
+    - specificity
+    - Youden index = sensitivity + specificity - 1
+    """
+    y_true = np.asarray(y_true).reshape(-1).astype(np.int64)
+    y_prob = np.asarray(y_prob).reshape(-1)
+    y_pred = (y_prob >= threshold).astype(np.int64)
+
+    tn, fp, fn, tp = sk_metrics.confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    sensitivity = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
+    youden = sensitivity + specificity - 1.0
+
+    has_both_classes = np.unique(y_true).size == 2
+    auroc = float(sk_metrics.roc_auc_score(y_true, y_prob)) if has_both_classes else float("nan")
+
+    return {
+        "auroc": auroc,
+        "auprc": float(sk_metrics.average_precision_score(y_true, y_prob)),
+        "sensitivity": sensitivity,
+        "specificity": specificity,
+        "youden": float(youden),
+    }
+
+
 def run_spes_soz_classification(dataset_root: str) -> List[Dict[str, float]]:
     """Run SPES SOZ classification with the shared dataset-task pipeline.
 
@@ -263,9 +299,18 @@ def run_spes_soz_classification(dataset_root: str) -> List[Dict[str, float]]:
             dataset_root=dataset_root,
             paradigm=str(config["paradigm"]),
         )
-        train_dataset, val_dataset, test_dataset = split_by_patient(
-            sample_dataset, [0.6, 0.2, 0.2], seed=SEED
-        )
+        patient_count = int(len(sample_dataset.patient_to_index))
+        if patient_count >= 3:
+            train_dataset, val_dataset, test_dataset = split_by_patient(
+                sample_dataset, [0.6, 0.2, 0.2], seed=SEED
+            )
+        else:
+            # For tiny cohorts (e.g., one patient after filtering), patient-level
+            # splitting can produce empty train/val sets. Fall back to sample-level
+            # splitting to keep the script runnable for experimentation.
+            train_dataset, val_dataset, test_dataset = split_by_sample(
+                sample_dataset, [0.6, 0.2, 0.2], seed=SEED
+            )
         train_loader = get_dataloader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
         val_loader = get_dataloader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
         test_loader = get_dataloader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -278,7 +323,9 @@ def run_spes_soz_classification(dataset_root: str) -> List[Dict[str, float]]:
             epochs=EPOCHS,
             monitor=None,
         )
-        metrics = trainer.evaluate(test_loader)
+        y_true_all, y_prob_all, loss_mean = trainer.inference(test_loader)
+        metrics = _compute_paper_metrics(y_true=y_true_all, y_prob=y_prob_all)
+        metrics["loss"] = float(loss_mean)
 
         summary = {"config": config["name"]}
         for key, value in metrics.items():

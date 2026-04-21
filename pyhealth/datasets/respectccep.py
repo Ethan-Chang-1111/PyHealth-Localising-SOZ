@@ -37,7 +37,7 @@ from .base_dataset import BaseDataset
 
 import pyhealth.processors.label_processor as lp
 
-_original_fit = lp.FeatureProcessor.fit
+_original_binary_fit = lp.BinaryLabelProcessor.fit
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +69,13 @@ def _safe_fit(
             field,
         )
         return
-    _original_fit(self, samples, field)
+    _original_binary_fit(self, samples, field)
 
 
 def _ensure_binary_label_patch() -> None:
     """Install the single-class binary-label workaround exactly once."""
-    if lp.FeatureProcessor.fit is not _safe_fit:
-        lp.FeatureProcessor.fit = _safe_fit
+    if lp.BinaryLabelProcessor.fit is not _safe_fit:
+        lp.BinaryLabelProcessor.fit = _safe_fit
 
 
 class RESPectCCEPDataset(BaseDataset):
