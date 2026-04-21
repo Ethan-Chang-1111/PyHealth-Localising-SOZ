@@ -1,92 +1,178 @@
-"""Synthetic SPES SOZ ablation study example.
+"""SPES SOZ classification experiments from Norris et al. (ML4H 2024).
 
-This script runs a small ablation with synthetic SPES samples for:
-- CNN ResNet (divergent), with/without distance features
-- CNN ResNet (convergent), with/without distance features
-- CNN Transformer (convergent), with/without distance features
+The only difference between modes is the data source:
+- real: load from an existing RESPect CCEP root path
+- synthetic: generate a RESPect-compatible CSV under a temporary root
 
-The synthetic data block is intentionally placed at the start so the example is
-fully runnable without external dataset downloads.
+Both modes then run the same flow:
+RESPectCCEPDataset -> SeizureOnsetZoneLocalisation -> split/loaders -> training.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import argparse
+import json
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 from pyhealth.datasets import get_dataloader, split_by_patient
-from pyhealth.datasets import create_sample_dataset
+from pyhealth.datasets.respectccep import RESPectCCEPDataset
 from pyhealth.models import SPESResNet, SPESTransformer
+from pyhealth.tasks.ccep_detect_soz import SeizureOnsetZoneLocalisation
 from pyhealth.trainer import Trainer
 
-N_SAMPLES = 50
-MIN_CHANNELS = 2
-MAX_CHANNELS = 4
 TIMESTEPS = 509
 SEED = 2026
 BATCH_SIZE = 2
 EPOCHS = 5
+SYNTHETIC_N_PATIENTS = 10
+SYNTHETIC_N_ELECTRODES = 20
+SYNTHETIC_N_STIM_PAIRS = 6
+SYNTHETIC_ANNOTATED_PATIENT_RATIO = 0.5
+SYNTHETIC_SOZ_POSITIVE_RATIO = 0.144
 
 
-def generate_synthetic_spes_samples(
-    n_samples: int = 12,
-    min_channels: int = 3,
-    max_channels: int = 6,
-    timesteps: int = 509,
-    seed: int = 42,
-) -> List[Dict[str, Any]]:
-    """Create synthetic SPES samples with variable channel counts."""
-    if n_samples < 2:
-        raise ValueError("n_samples must be >= 2 to include both binary labels.")
-    if min_channels < 1 or max_channels < min_channels:
-        raise ValueError("Invalid channel bounds for synthetic SPES generation.")
+def _to_json_1d(arr: np.ndarray) -> str:
+    """Serialize a 1-D float32 array in dataset-compatible format."""
+    return json.dumps(arr.astype(np.float32).tolist(), separators=(",", ":"))
+
+
+def _pick_stim_pairs(
+    electrodes: List[str],
+    n_pairs: int,
+    rng: np.random.Generator,
+) -> List[Tuple[str, str]]:
+    """Pick unique stimulation pairs from available electrodes."""
+    pairs: List[Tuple[str, str]] = []
+    for i in range(len(electrodes)):
+        for j in range(i + 1, len(electrodes)):
+            pairs.append((electrodes[i], electrodes[j]))
+    rng.shuffle(pairs)
+    return pairs[: max(1, min(n_pairs, len(pairs)))]
+
+
+def _build_synthetic_respect_table(
+    n_patients: int,
+    n_electrodes: int,
+    n_stim_pairs: int,
+    timesteps: int,
+    seed: int,
+    annotated_patient_ratio: float,
+    soz_positive_ratio: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Create synthetic RESPect-compatible participants and row table."""
+    if n_patients < 2:
+        raise ValueError("n_patients must be >= 2.")
+    if n_electrodes < 4:
+        raise ValueError("n_electrodes must be >= 4.")
     if timesteps < 200:
-        raise ValueError("timesteps must be >= 200 for SPES model compatibility.")
+        raise ValueError("timesteps must be >= 200 for SPES models.")
+    if not 0.0 <= annotated_patient_ratio <= 1.0:
+        raise ValueError("annotated_patient_ratio must be between 0.0 and 1.0.")
+    if not 0.0 < soz_positive_ratio < 1.0:
+        raise ValueError("soz_positive_ratio must be between 0.0 and 1.0.")
 
     rng = np.random.default_rng(seed)
-    samples: List[Dict[str, Any]] = []
+    participants: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
+    n_annotated = int(round(n_patients * annotated_patient_ratio))
+    n_annotated = max(1, min(n_patients - 1, n_annotated))
 
-    for idx in range(n_samples):
-        n_channels = int(rng.integers(min_channels, max_channels + 1))
-        signal = rng.normal(size=(n_channels, 2, timesteps)).astype(np.float32)
-        signal[:, 0, 0] = rng.uniform(1.0, 60.0, size=(n_channels,)).astype(np.float32)
-        samples.append(
+    for p_idx in range(n_patients):
+        participant_id = f"sub-{p_idx + 1:02d}"
+        session_id = "ses-1"
+        participants.append(
             {
-                "patient_id": f"patient-{idx}",
-                "visit_id": f"visit-{idx // 2}",
-                "spes_responses": signal.tolist(),
-                "soz_label": int(idx % 2),
+                "participant_id": participant_id,
+                "session": session_id,
+                "age": int(rng.integers(18, 61)),
+                "sex": "M" if p_idx % 2 == 0 else "F",
             }
         )
-    return samples
+
+        electrodes = [f"E{e + 1:02d}" for e in range(n_electrodes)]
+        coords: Dict[str, Tuple[float, float, float]] = {
+            elec: (
+                float(rng.uniform(-40, 40)),
+                float(rng.uniform(-40, 40)),
+                float(rng.uniform(-40, 40)),
+            )
+            for elec in electrodes
+        }
+        is_annotated_patient = p_idx < n_annotated
+        if is_annotated_patient:
+            n_positive = max(1, int(round(n_electrodes * soz_positive_ratio)))
+            positive_indices = set(
+                int(i) for i in rng.choice(n_electrodes, size=n_positive, replace=False)
+            )
+            soz_map = {
+                elec: int(i in positive_indices) for i, elec in enumerate(electrodes)
+            }
+        else:
+            # Mimic patients without SOZ-positive annotations.
+            soz_map = {elec: 0 for elec in electrodes}
+        stim_pairs = _pick_stim_pairs(electrodes=electrodes, n_pairs=n_stim_pairs, rng=rng)
+
+        for rec in electrodes:
+            for stim_1, stim_2 in stim_pairs:
+                if rec in (stim_1, stim_2):
+                    continue
+                mean_resp = rng.normal(0.0, 1.0, size=(timesteps,)).astype(np.float32)
+                std_resp = np.abs(rng.normal(0.35, 0.1, size=(timesteps,))).astype(np.float32)
+                rec_x, rec_y, rec_z = coords[rec]
+                rows.append(
+                    {
+                        "participant_id": participant_id,
+                        "session_id": session_id,
+                        "run_id": "run-1",
+                        "age": participants[-1]["age"],
+                        "sex": participants[-1]["sex"],
+                        "recording_electrode": rec,
+                        "stim_1": stim_1,
+                        "stim_2": stim_2,
+                        "response_ts": _to_json_1d(mean_resp),
+                        "response_ts_std": _to_json_1d(std_resp),
+                        "soz_label": int(soz_map[rec]),
+                        "recording_x": rec_x,
+                        "recording_y": rec_y,
+                        "recording_z": rec_z,
+                    }
+                )
+
+    return pd.DataFrame(participants), pd.DataFrame(rows)
 
 
-def create_synthetic_spes_dataset(
-    n_samples: int = 12,
-    min_channels: int = 3,
-    max_channels: int = 6,
-    timesteps: int = 509,
-    seed: int = 42,
-    dataset_name: str = "synthetic_spes_ablation",
-):
-    """Build an in-memory SampleDataset for SPES ablation."""
-    samples = generate_synthetic_spes_samples(
-        n_samples=n_samples,
-        min_channels=min_channels,
-        max_channels=max_channels,
+def _create_synthetic_dataset_root(
+    base_dir: str,
+    n_patients: int,
+    n_electrodes: int,
+    n_stim_pairs: int,
+    timesteps: int,
+    seed: int,
+    annotated_patient_ratio: float,
+    soz_positive_ratio: float,
+) -> str:
+    """Create a synthetic RESPect dataset root for RESPectCCEPDataset."""
+    root = Path(base_dir)
+    participants_df, rows_df = _build_synthetic_respect_table(
+        n_patients=n_patients,
+        n_electrodes=n_electrodes,
+        n_stim_pairs=n_stim_pairs,
         timesteps=timesteps,
         seed=seed,
+        annotated_patient_ratio=annotated_patient_ratio,
+        soz_positive_ratio=soz_positive_ratio,
     )
-    return create_sample_dataset(
-        samples=samples,
-        input_schema={"spes_responses": "tensor"},
-        output_schema={"soz_label": "binary"},
-        dataset_name=dataset_name,
-    )
+    participants_df.to_csv(root / "participants.tsv", sep="\t", index=False)
+    rows_df.to_csv(root / "respect_ccep_data-pyhealth.csv", index=False)
+    return str(root)
 
 
-def get_spes_ablation_configs() -> List[Dict[str, Any]]:
-    """Return SPES ablation model configurations."""
+def get_spes_classification_configs() -> List[Dict[str, Any]]:
+    """Return paper-aligned SPES SOZ model configurations."""
     return [
         {
             "name": "cnn_resnet_divergent_no_features",
@@ -127,8 +213,8 @@ def get_spes_ablation_configs() -> List[Dict[str, Any]]:
     ]
 
 
-def build_spes_ablation_model(config: Dict[str, Any], dataset):
-    """Instantiate SPES ablation model for one config."""
+def build_spes_classification_model(config: Dict[str, Any], dataset):
+    """Instantiate one SPES SOZ classification model configuration."""
     include_distance = bool(config["include_distance"])
     if config["model_type"] == "spes_resnet":
         return SPESResNet(
@@ -153,31 +239,38 @@ def build_spes_ablation_model(config: Dict[str, Any], dataset):
     raise ValueError(f"Unsupported model_type: {config['model_type']}")
 
 
-def run_synthetic_spes_ablation() -> List[Dict[str, float]]:
-    """Run SPES ablation configurations on tiny synthetic data.
+def _build_task_dataset_from_root(
+    dataset_root: str,
+    paradigm: str,
+):
+    """Build task-processed samples from a RESPect dataset root."""
+    base_dataset = RESPectCCEPDataset(root=dataset_root)
+    task = SeizureOnsetZoneLocalisation(spes_mode=paradigm)
+    return base_dataset.set_task(task)
 
-    Returns:
-        A list of dicts containing configuration names and evaluation metrics.
+
+def run_spes_soz_classification(dataset_root: str) -> List[Dict[str, float]]:
+    """Run SPES SOZ classification with the shared dataset-task pipeline.
+
+    This compares paper-relevant configurations:
+    - CNN ResNet in divergent and convergent paradigms
+    - CNN Transformer in convergent paradigm
+    - each with/without distance (spatial) feature usage
     """
-    # STEP 0: Generate a small synthetic dataset for this ablation.
-    sample_dataset = create_synthetic_spes_dataset(
-        n_samples=N_SAMPLES,
-        min_channels=MIN_CHANNELS,
-        max_channels=MAX_CHANNELS,
-        timesteps=TIMESTEPS,
-        seed=SEED,
-    )
-
-    train_dataset, val_dataset, test_dataset = split_by_patient(
-        sample_dataset, [0.6, 0.2, 0.2], seed=SEED
-    )
-    train_loader = get_dataloader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = get_dataloader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-    test_loader = get_dataloader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-
     results: List[Dict[str, float]] = []
-    for config in get_spes_ablation_configs():
-        model = build_spes_ablation_model(config=config, dataset=sample_dataset)
+    for config in get_spes_classification_configs():
+        sample_dataset = _build_task_dataset_from_root(
+            dataset_root=dataset_root,
+            paradigm=str(config["paradigm"]),
+        )
+        train_dataset, val_dataset, test_dataset = split_by_patient(
+            sample_dataset, [0.6, 0.2, 0.2], seed=SEED
+        )
+        train_loader = get_dataloader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+        val_loader = get_dataloader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        test_loader = get_dataloader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+        model = build_spes_classification_model(config=config, dataset=sample_dataset)
         trainer = Trainer(model=model, enable_logging=False)
         trainer.train(
             train_dataloader=train_loader,
@@ -187,7 +280,6 @@ def run_synthetic_spes_ablation() -> List[Dict[str, float]]:
         )
         metrics = trainer.evaluate(test_loader)
 
-        # Convert values to float for concise tabular output.
         summary = {"config": config["name"]}
         for key, value in metrics.items():
             if isinstance(value, (int, float)):
@@ -198,8 +290,76 @@ def run_synthetic_spes_ablation() -> List[Dict[str, float]]:
 
 
 if __name__ == "__main__":
-    ablation_results = run_synthetic_spes_ablation()
-    print("SPES Synthetic SOZ Classification Results")
-    for row in ablation_results:
+    parser = argparse.ArgumentParser(
+        description=(
+            "SPES SOZ classification experiments. Use --dataset-root to run the real "
+            "RESPectCCEPDataset + SeizureOnsetZoneLocalisation pipeline."
+        )
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=str,
+        default=None,
+        help="Optional path to RESPect CCEP (OpenNeuro ds004080) root.",
+    )
+    parser.add_argument(
+        "--synthetic-patients",
+        type=int,
+        default=SYNTHETIC_N_PATIENTS,
+        help="Number of synthetic patients when --dataset-root is omitted.",
+    )
+    parser.add_argument(
+        "--synthetic-electrodes",
+        type=int,
+        default=SYNTHETIC_N_ELECTRODES,
+        help="Number of electrodes per synthetic patient.",
+    )
+    parser.add_argument(
+        "--synthetic-stim-pairs",
+        type=int,
+        default=SYNTHETIC_N_STIM_PAIRS,
+        help="Number of stimulation pairs sampled per synthetic patient.",
+    )
+    parser.add_argument(
+        "--timesteps",
+        type=int,
+        default=TIMESTEPS,
+        help="Response timeseries length for synthetic generation.",
+    )
+    parser.add_argument(
+        "--synthetic-annotated-ratio",
+        type=float,
+        default=SYNTHETIC_ANNOTATED_PATIENT_RATIO,
+        help="Fraction of synthetic patients with SOZ-positive annotations.",
+    )
+    parser.add_argument(
+        "--synthetic-soz-positive-ratio",
+        type=float,
+        default=SYNTHETIC_SOZ_POSITIVE_RATIO,
+        help="SOZ-positive electrode ratio for annotated synthetic patients.",
+    )
+    args = parser.parse_args()
+
+    if args.dataset_root:
+        classification_results = run_spes_soz_classification(dataset_root=args.dataset_root)
+        print("SPES SOZ Classification Results (real dataset source)")
+    else:
+        with tempfile.TemporaryDirectory(prefix="spes_synth_respect_") as tmp_dir:
+            synthetic_root = _create_synthetic_dataset_root(
+                base_dir=tmp_dir,
+                n_patients=int(args.synthetic_patients),
+                n_electrodes=int(args.synthetic_electrodes),
+                n_stim_pairs=int(args.synthetic_stim_pairs),
+                timesteps=int(args.timesteps),
+                seed=SEED,
+                annotated_patient_ratio=float(args.synthetic_annotated_ratio),
+                soz_positive_ratio=float(args.synthetic_soz_positive_ratio),
+            )
+            classification_results = run_spes_soz_classification(
+                dataset_root=synthetic_root
+            )
+        print("SPES SOZ Classification Results (synthetic dataset source)")
+
+    for row in classification_results:
         print(row)
 
