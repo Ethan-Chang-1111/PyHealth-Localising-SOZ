@@ -151,6 +151,7 @@ def _row(
         "recording_y": y,
         "recording_z": z,
         "response_ts": _make_response_ts(seed=response_seed),
+        "response_ts_std": _make_response_ts(seed=response_seed+100),
     }
 
 
@@ -370,6 +371,7 @@ class TestRESPectCCEPDatasetPrepareData(unittest.TestCase):
                 "stim_1": "P29",
                 "stim_2": "P30",
                 "response_ts": _make_response_ts(seed=1),
+                "response_ts_std": _make_response_ts(seed=101),
                 "soz_label": 1,
                 "recording_x": 10.0,
                 "recording_y": 20.0,
@@ -385,6 +387,7 @@ class TestRESPectCCEPDatasetPrepareData(unittest.TestCase):
                 "stim_1": "P29",
                 "stim_2": "P30",
                 "response_ts": _make_response_ts(seed=2),
+                "response_ts_std": _make_response_ts(seed=102),
                 "soz_label": 0,
                 "recording_x": 11.0,
                 "recording_y": 21.0,
@@ -706,9 +709,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
 
     def test_input_schema_keys(self):
         self.assertIn("spes_responses", SeizureOnsetZoneLocalisation.input_schema)
-        self.assertIn("stim_distances", SeizureOnsetZoneLocalisation.input_schema)
-        self.assertEqual(SeizureOnsetZoneLocalisation.input_schema["spes_responses"], "timeseries")
-        self.assertEqual(SeizureOnsetZoneLocalisation.input_schema["stim_distances"], "timeseries")
+        self.assertNotIn("stim_distances", SeizureOnsetZoneLocalisation.input_schema)
+        self.assertEqual(SeizureOnsetZoneLocalisation.input_schema["spes_responses"], "tensor")
 
     def test_output_schema(self):
         self.assertIn("soz_label", SeizureOnsetZoneLocalisation.output_schema)
@@ -786,10 +788,10 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         patient = _make_patient(rows)
         samples = task(patient)
         self.assertEqual(len(samples), 1)
-        _, values = samples[0]["spes_responses"]
+        values = samples[0]["spes_responses"]
         shape = values.shape
         self.assertEqual(shape[0], 3, "Expected 3 input channels (one per stim site)")
-        self.assertEqual(shape[1], _T)
+        self.assertEqual(shape[2], _T + 1)
 
     # ---- output schema compliance ----------------------------------------
 
@@ -799,7 +801,7 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         patient = _make_patient(rows)
         sample = task(patient)[0]
         required = {"patient_id", "visit_id", "electrode_id",
-                    "spes_responses", "stim_distances", "soz_label"}
+                    "spes_responses", "soz_label"}
         self.assertTrue(required.issubset(set(sample.keys())))
 
     def test_spes_responses_dtype_float32(self):
@@ -810,32 +812,16 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         _, values = sample["spes_responses"]
         self.assertEqual(values.dtype, np.float32)
 
-    def test_stim_distances_dtype_float32(self):
+    def test_spes_responses_is_3d(self):
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
         rows = [_row("P22", "P29", "P30")]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        _, values = sample["stim_distances"]
-        self.assertEqual(values.dtype, np.float32)
+        values = sample["spes_responses"]
+        self.assertEqual(values.ndim, 3)
 
-    def test_spes_responses_is_2d(self):
-        task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
-        rows = [_row("P22", "P29", "P30")]
-        patient = _make_patient(rows)
-        sample = task(patient)[0]
-        _, values = sample["spes_responses"]
-        self.assertEqual(values.ndim, 2)
-
-    def test_stim_distances_is_1d(self):
-        task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
-        rows = [_row("P22", "P29", "P30")]
-        patient = _make_patient(rows)
-        sample = task(patient)[0]
-        _, values = sample["stim_distances"]
-        self.assertEqual(values.ndim, 1)
-
-    def test_channel_and_distance_dimensions_match(self):
-        """C dim of spes_responses must equal length of stim_distances."""
+    def test_channel_shape_dimensions(self):
+        """C dim of spes_responses is correctly formatted with 2 modes (mean, std)."""
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
         rows = [
             _row("P22", "P29", "P30", response_seed=1),
@@ -843,12 +829,21 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         ]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        _, response_values = sample["spes_responses"]
-        _, distance_values = sample["stim_distances"]
+        response_values = sample["spes_responses"]
         self.assertEqual(
             response_values.shape[0],
-            distance_values.shape[0],
+            2, # C = 2 specific rows were added (stim sites)
         )
+        self.assertEqual(
+            response_values.shape[1],
+            2, # 2 means modes (mean, std)
+        )
+        self.assertEqual(
+            response_values.shape[2],
+            _T + 1, # T + 1 for distance prepended
+        )
+
+
 
     def test_visit_id_populated_from_session(self):
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
@@ -915,7 +910,7 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         patient = _make_patient(rows)
         samples = task(patient)
         self.assertEqual(len(samples), 1)
-        _, values = samples[0]["spes_responses"]
+        values = samples[0]["spes_responses"]
         self.assertEqual(values.shape[0], 1)
 
     def test_distance_filter_unknown_coords_includes_site(self):
@@ -931,7 +926,7 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         self.assertEqual(len(samples), 1)
 
     def test_distances_clamped_to_zero_when_unknown(self):
-        """Entries in stim_distances should be 0.0 when coordinates were unavailable."""
+        """Entries in spes_responses[c,0,0] should be 0.0 when coordinates were unavailable."""
         task = SeizureOnsetZoneLocalisation(min_distance_mm=0.0)
         rows = [
             _row("P22", "P29", "P30", soz_label=0,
@@ -939,8 +934,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         ]
         patient = _make_patient(rows)
         samples = task(patient)
-        _, values = samples[0]["stim_distances"]
-        self.assertEqual(values[0], 0.0)
+        values = samples[0]["spes_responses"]
+        self.assertEqual(values[0, 0, 0], 0.0)
 
     # ---- stim key canonicalisation --------------------------------------
 
@@ -955,7 +950,7 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         samples = task(patient)
         self.assertEqual(len(samples), 1)
         # Two responses for the same canonical key → averaged → still 1 channel
-        _, values = samples[0]["spes_responses"]
+        values = samples[0]["spes_responses"]
         self.assertEqual(values.shape[0], 1)
 
     # ---- response timeseries handling -----------------------------------
@@ -972,7 +967,7 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         samples = task(patient)
         self.assertEqual(len(samples), 1)
         # Only row1's stim site contributes → C=1
-        _, values = samples[0]["spes_responses"]
+        values = samples[0]["spes_responses"]
         self.assertEqual(values.shape[0], 1)
 
     def test_timeseries_length_preserved(self):
@@ -981,8 +976,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         rows = [_row("P22", "P29", "P30", response_seed=7)]
         patient = _make_patient(rows)
         sample = task(patient)[0]
-        _, values = sample["spes_responses"]
-        self.assertEqual(values.shape[1], _T)
+        values = sample["spes_responses"]
+        self.assertEqual(values.shape[2], _T + 1)
 
     # ---- class balance tracking -----------------------------------------
 
@@ -1026,8 +1021,8 @@ class TestSeizureOnsetZoneLocalisationTask(unittest.TestCase):
         ]
         patient_b = _make_patient(rows_b, patient_id="sub-02")
 
-        _, values_a = task(patient_a)[0]["spes_responses"]
-        _, values_b = task(patient_b)[0]["spes_responses"]
+        values_a = task(patient_a)[0]["spes_responses"]
+        values_b = task(patient_b)[0]["spes_responses"]
         c_a = values_a.shape[0]
         c_b = values_b.shape[0]
         self.assertNotEqual(c_a, c_b,

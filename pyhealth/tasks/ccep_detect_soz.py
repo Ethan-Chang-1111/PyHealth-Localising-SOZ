@@ -1,4 +1,11 @@
-"""PyHealth task for Seizure Onset Zone (SOZ) localisation from SPES responses.
+"""
+Contributor: Ethan Chang
+NetID: 
+Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
+Paper Link: https://proceedings.mlr.press/v252/norris24a.html
+Description: PyHealth task for Seizure Onset Zone (SOZ) localisation from SPES responses.
+
+PyHealth task for Seizure Onset Zone (SOZ) localisation from SPES responses.
 
 Task paper:
     Norris et al. (ML4H 2024). "Localising the Seizure Onset Zone from
@@ -12,10 +19,12 @@ Dataset:
 
 Overview
 --------
-This task implements the **convergent** SPES analysis paradigm from Norris et al.
-(2024): each candidate electrode ``e`` is classified as SOZ or non-SOZ from the
-multi-channel matrix of mean CCEPs it *received* when every other electrode was
-stimulated.  Critically, the dataset already handles all signal preprocessing
+This task implements both the **convergent** and **divergent** SPES analysis paradigms from Norris et al.
+(2024): 
+- in **convergent** mode, each candidate electrode ``e`` is classified as SOZ or non-SOZ from the
+  multi-channel matrix of mean CCEPs it *received* when every other electrode was stimulated.
+- in **divergent** mode, each stimulation pair ``e1-e2`` is classified as SOZ or non-SOZ from the
+  multi-channel matrix of mean CCEPs it *elicited* across all other recording electrodes.
 (bandpass filtering, epoching, baseline correction, resampling, and trial
 averaging); the task's responsibility is to:
 
@@ -59,8 +68,7 @@ Usage
     'patient_id':    'sub-01',
     'visit_id':      'ses-1',
     'electrode_id':  'P22',
-    'spes_responses': (array([0., 1., ..., C-1.]), array([[...]], dtype=float32)),
-    'stim_distances': (array([0., 1., ..., C-1.]), array([...], dtype=float32)),
+    'spes_responses': array([[[...]]], dtype=float32),   # [C, 2, T+1]
     'soz_label':     0,
 }
 >>> train_ds, val_ds, test_ds = split_by_patient(samples, [0.8, 0.1, 0.1])
@@ -122,10 +130,9 @@ class SeizureOnsetZoneLocalisation(BaseTask):
     ----------
     task_name : str
     input_schema : Dict[str, str]
-        ``spes_responses`` — ``"timeseries"`` processor converts the
-        ``[C, T]`` float32 array to a tensor.
-        ``stim_distances`` — ``"timeseries"`` processor converts the
-        ``[C]`` float32 array to a tensor.
+        ``spes_responses`` — ``"tensor"`` processor converts the
+        ``[C, 2, T+1]`` float32 array to a torch tensor. PyHealth's dataloader
+        automatically pads the variable length ``C`` dimension using sequence padding.
     output_schema : Dict[str, str]
         ``soz_label`` — ``"binary"`` processor converts the ``{0, 1}`` int
         to a binary tensor.
@@ -139,17 +146,13 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         session is absent from the metadata.
     electrode_id : str
         Recording electrode label (e.g. ``"P22"``).
-    spes_responses : Tuple[np.ndarray, np.ndarray] — ``(channel_index, data)``
-        ``channel_index`` is a float32 arange of shape ``[C]``.
-        ``data`` is the stacked trial-averaged CCEP matrix of shape ``[C, T]``,
-        dtype float32.  ``C`` is the number of stimulation sites that passed
-        the distance filter; ``T`` is the number of time points in each
-        resampled epoch.  **C varies across patients and electrodes.**
-    stim_distances : Tuple[np.ndarray, np.ndarray] — ``(channel_index, data)``
-        ``channel_index`` is the same float32 arange of shape ``[C]``.
-        ``data`` is the Euclidean distance (mm) array of shape ``[C]``,
-        dtype float32, one entry per stimulation site.  Entries are ``0.0``
-        when spatial coordinates were unavailable.
+    spes_responses : np.ndarray
+        Stacked trial-averaged CCEP matrix of shape ``[C, 2, T+1]``,
+        dtype float32, matching the original paper's matrix format.
+        ``C`` is the number of stimulation sites that passed the distance filter.
+        ``2`` corresponds to the mean and standard deviation matrices.
+        ``T+1`` is the number of time points in each resampled epoch, plus the
+        Euclidean distance appended at index 0. **C varies across patients and electrodes.**
     soz_label : int
         Binary SOZ membership label: ``1`` if the electrode is within the
         clinician-defined Seizure Onset Zone, ``0`` otherwise.
@@ -158,20 +161,26 @@ class SeizureOnsetZoneLocalisation(BaseTask):
     task_name: str = "SeizureOnsetZoneLocalisation"
 
     input_schema: Dict[str, str] = {
-        "spes_responses": "timeseries",
-        "stim_distances": "timeseries",
+        "spes_responses": "tensor",
     }
     output_schema: Dict[str, str] = {
         "soz_label": "binary",
     }
 
-    def __init__(self, min_distance_mm: float = _DEFAULT_MIN_DISTANCE_MM) -> None:
+    def __init__(
+        self, 
+        min_distance_mm: float = _DEFAULT_MIN_DISTANCE_MM,
+        spes_mode: str = "convergent"
+    ) -> None:
         super().__init__()
         if min_distance_mm < 0:
             raise ValueError(
                 f"min_distance_mm must be >= 0, got {min_distance_mm}."
             )
+        if spes_mode not in ("convergent", "divergent"):
+            raise ValueError(f"spes_mode must be 'convergent' or 'divergent', got {spes_mode}.")
         self.min_distance_mm = min_distance_mm
+        self.spes_mode = spes_mode
 
     # ------------------------------------------------------------------
     # Core BaseTask method
@@ -226,9 +235,9 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         #                            "coords": (x, y, z) | None}
         electrode_meta: Dict[str, Dict[str, Any]] = {}
 
-        # stim_responses[rec_id][stim_site_key] = list of 1-D float32 arrays
+        # stim_responses[rec_id][stim_site_key] = list of (mean_arr, std_arr)
         # stim_site_key is the canonical "E1-E2" label built from stim_1, stim_2.
-        stim_responses: DefaultDict[str, DefaultDict[str, List[np.ndarray]]] = defaultdict(
+        stim_responses: DefaultDict[str, DefaultDict[str, List[Tuple[np.ndarray, np.ndarray]]]] = defaultdict(
             lambda: defaultdict(list)
         )
 
@@ -255,18 +264,30 @@ class SeizureOnsetZoneLocalisation(BaseTask):
 
             # ---- response timeseries -----------------------------------
             ts = getattr(event, "response_ts", None)
-            if ts is None:
+            ts_std = getattr(event, "response_ts_std", None)
+            if ts is None or ts_std is None:
                 continue
-            arr = _parse_response_ts(ts)
-            if arr is not None:
-                stim_responses[rec_id][stim_key].append(arr)
+            arr_mean = _parse_response_ts(ts)
+            arr_std = _parse_response_ts(ts_std)
+            if arr_mean is not None and arr_std is not None:
+                stim_responses[rec_id][stim_key].append((arr_mean, arr_std))
 
         if not electrode_meta:
             return []
 
-        # ----------------------------------------------------------------
-        # Pass 2 — build one convergent sample per labelled electrode.
-        # ----------------------------------------------------------------
+        if self.spes_mode == "convergent":
+            return self._generate_convergent_samples(patient, electrode_meta, stim_responses, coord_lookup)
+        else:
+            return self._generate_divergent_samples(patient, electrode_meta, stim_responses, coord_lookup)
+
+    def _generate_convergent_samples(
+        self, 
+        patient: Patient,
+        electrode_meta: Dict[str, Dict[str, Any]],
+        stim_responses: DefaultDict[str, DefaultDict[str, List[Tuple[np.ndarray, np.ndarray]]]],
+        coord_lookup: Dict[str, Tuple[float, float, float]]
+    ) -> List[Dict[str, Any]]:
+        """Build one convergent sample per labelled recording electrode."""
         samples: List[Dict[str, Any]] = []
         for rec_id, meta in electrode_meta.items():
             soz_label: int = meta["soz_label"]
@@ -279,7 +300,7 @@ class SeizureOnsetZoneLocalisation(BaseTask):
                 )
                 continue
 
-            per_site: DefaultDict[str, List[np.ndarray]] = stim_responses[rec_id]
+            per_site: DefaultDict[str, List[Tuple[np.ndarray, np.ndarray]]] = stim_responses[rec_id]
             if not per_site:
                 continue
 
@@ -288,7 +309,6 @@ class SeizureOnsetZoneLocalisation(BaseTask):
             # electrode and apply the min_distance_mm threshold.
             # ----------------------------------------------------------
             channel_responses: List[np.ndarray] = []
-            channel_distances: List[float] = []
 
             for stim_key, response_list in per_site.items():
                 if not response_list:
@@ -306,16 +326,26 @@ class SeizureOnsetZoneLocalisation(BaseTask):
                 if dist != _DIST_UNKNOWN and dist < self.min_distance_mm:
                     continue
 
-                # The dataset already averages across trials inside
-                # _process_run; each list should normally contain exactly one
-                # array.  We take the mean defensively in case multiple runs
-                # contribute responses for the same stim site.
-                mean_resp = _mean_responses(response_list)
-                if mean_resp is None:
+                # Defensively average across runs. (mean_arr, std_arr)
+                # Usually there's only one run so mean_resp is the identical array.
+                mean_resps = [item[0] for item in response_list]
+                std_resps = [item[1] for item in response_list]
+                
+                final_mean_resp = _mean_responses(mean_resps)
+                final_std_resp = _mean_responses(std_resps) # For standard deviation arrays we simply average them across redundant runs as well
+
+                if final_mean_resp is None or final_std_resp is None:
                     continue
 
-                channel_responses.append(mean_resp)
-                channel_distances.append(max(dist, 0.0))  # clamp _DIST_UNKNOWN → 0
+                # Prepend the distance for spatial representation (as expected by original models)
+                # shape becomes: [2, T+1] where T is max timesteps.
+                clamped_dist = max(dist, 0.0)
+
+                dist_arr = np.array([clamped_dist], dtype=np.float32)
+                combined_mean = np.concatenate([dist_arr, final_mean_resp])
+                combined_std = np.concatenate([dist_arr, final_std_resp])
+
+                channel_responses.append(np.stack([combined_mean, combined_std], axis=0).astype(np.float32))
 
             if not channel_responses:
                 logger.debug(
@@ -327,23 +357,16 @@ class SeizureOnsetZoneLocalisation(BaseTask):
                 )
                 continue
 
-            # Stack → [C, T]
+            # Stack → [C, 2, T+1]
             response_matrix = np.stack(channel_responses, axis=0).astype(np.float32)
-            distances_arr = np.array(channel_distances, dtype=np.float32)
 
-            # TimeSeriesProcessor expects each timeseries field as a
-            # (timestamps, values) 2-tuple.  timestamps is a 1-D index array
-            # over the first axis of values (channels, in both cases here).
-            n_channels = response_matrix.shape[0]
-            channel_index = np.arange(n_channels, dtype=np.float32)
             samples.append(
                 {
                     "patient_id": patient.patient_id,
                     "visit_id": meta["visit_id"],
                     "electrode_id": rec_id,
-                    "spes_responses": (channel_index, response_matrix),   # ([C], [C, T])
-                    "stim_distances": (channel_index, distances_arr),     # ([C], [C])
-                    "soz_label": soz_label,                               # int {0, 1}
+                    "spes_responses": response_matrix,               # [C, 2, T+1]
+                    "soz_label": soz_label,                          # int {0, 1}
                 }
             )
 
@@ -367,6 +390,99 @@ class SeizureOnsetZoneLocalisation(BaseTask):
         #         patient.patient_id,
         #     )
         #     return []
+
+        return samples
+
+    def _generate_divergent_samples(
+        self, 
+        patient: Patient,
+        electrode_meta: Dict[str, Dict[str, Any]],
+        stim_responses: DefaultDict[str, DefaultDict[str, List[Tuple[np.ndarray, np.ndarray]]]],
+        coord_lookup: Dict[str, Tuple[float, float, float]]
+    ) -> List[Dict[str, Any]]:
+        """Build divergent samples grouping by stimulation site."""
+        samples: List[Dict[str, Any]] = []
+
+        # Find all unique stim sites across the patient
+        all_stim_keys = set()
+        for rec_id, per_site in stim_responses.items():
+            all_stim_keys.update(per_site.keys())
+
+        for stim_key in all_stim_keys:
+            # Determine if this stim site is SOZ: True if either electrode is SOZ
+            stim_1, stim_2 = stim_key.split("-")
+            soz1 = electrode_meta.get(stim_1, {}).get("soz_label", 0)
+            soz2 = electrode_meta.get(stim_2, {}).get("soz_label", 0)
+            soz_label = 1 if (soz1 == 1 or soz2 == 1) else 0
+
+            # Get coords for this stim_key to calculate distances against recording sites
+            # (In standard protocol, stim coords are midpoints, or we take average)
+            c1 = coord_lookup.get(stim_1)
+            c2 = coord_lookup.get(stim_2)
+            if c1 is not None and c2 is not None:
+                stim_coords = ((c1[0]+c2[0])/2, (c1[1]+c2[1])/2, (c1[2]+c2[2])/2)
+            else:
+                stim_coords = c1 or c2
+
+            channel_responses: List[np.ndarray] = []
+
+            for rec_id, per_site in stim_responses.items():
+                if stim_key not in per_site:
+                    continue
+
+                response_list = per_site[stim_key]
+                if not response_list:
+                    continue
+
+                dist = _stim_distance(
+                    stim_key=rec_id, # Here we pretend rec_id is the "target" to measure distance
+                    rec_coords=stim_coords,
+                    coord_lookup=coord_lookup,
+                )
+
+                if dist != _DIST_UNKNOWN and dist < self.min_distance_mm:
+                    continue
+
+                mean_resps = [item[0] for item in response_list]
+                std_resps = [item[1] for item in response_list]
+                
+                final_mean_resp = _mean_responses(mean_resps)
+                final_std_resp = _mean_responses(std_resps)
+
+                if final_mean_resp is None or final_std_resp is None:
+                    continue
+
+                # Prepend the distance for spatial representation (as expected by original models)
+                # shape becomes: [2, T+1] where T is max timesteps.
+                clamped_dist = max(dist, 0.0)
+
+                dist_arr = np.array([clamped_dist], dtype=np.float32)
+                combined_mean = np.concatenate([dist_arr, final_mean_resp])
+                combined_std = np.concatenate([dist_arr, final_std_resp])
+
+                channel_responses.append(np.stack([combined_mean, combined_std], axis=0))
+
+            if not channel_responses:
+                continue
+
+            spes_tensor = np.stack(channel_responses, axis=0)
+
+            # Common visit_id fallback since multiple rec_ids have the same visit_id
+            visit_id = "unknown"
+            for rec_id in list(stim_responses.keys()):
+                visit_id = electrode_meta.get(rec_id, {}).get("visit_id", "unknown")
+                if visit_id != "unknown":
+                    break
+
+            samples.append(
+                {
+                    "patient_id": patient.patient_id,
+                    "visit_id": visit_id,
+                    "electrode": stim_key, # Use stim_key as the target entity
+                    "spes_responses": spes_tensor,
+                    "soz_label": soz_label,
+                }
+            )
 
         return samples
 

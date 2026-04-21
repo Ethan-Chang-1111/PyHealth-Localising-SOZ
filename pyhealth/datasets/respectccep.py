@@ -1,4 +1,12 @@
-"""PyHealth dataset for RESPect CCEP (OpenNeuro ds004080).
+"""PyHealth dataset for RESPect CCEP
+
+Contributor: 
+NetID: 
+Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
+Paper Link: https://proceedings.mlr.press/v252/norris24a.html
+Description: PyHealth dataset loader for RESPect CCEP (OpenNeuro ds004080) handling BIDS-style timeseries data.
+
+PyHealth dataset for RESPect CCEP (OpenNeuro ds004080).
 
 Dataset link:
     https://openneuro.org/datasets/ds004080
@@ -7,7 +15,7 @@ This loader scans a BIDS-style RESPect CCEP directory, extracts one
 trial-averaged response per ``(recording_electrode, stimulation_pair)``,
 and writes a compact metadata CSV for ``BaseDataset``. Each output row stores:
 
-- the mean evoked response timeseries for one recording electrode
+- the mean and std evoked response timeseries for one recording electrode
 - the recording electrode coordinates
 - the SOZ label and participant demographics
 
@@ -591,6 +599,7 @@ class RESPectCCEPDataset(BaseDataset):
 
             epoch_data = epochs.get_data()  # [trials, channels, time]
             mean_resp = epoch_data.mean(axis=0).astype(np.float32)
+            std_resp = epoch_data.std(axis=0).astype(np.float32)
 
             for ch_idx, rec_chan in enumerate(epochs.ch_names):
                 rec_coord = self._coord_tuple(electrodes_df, rec_chan)
@@ -602,7 +611,6 @@ class RESPectCCEPDataset(BaseDataset):
                         str(rec_row.iloc[0].get("soz", "no")).lower() == "yes"
                     )
 
-                # Keep only the mean response per channel as the canonical feature row.
                 rows.append(
                     {
                         "participant_id": participant_id,
@@ -614,6 +622,7 @@ class RESPectCCEPDataset(BaseDataset):
                         "stim_1": stim_1,
                         "stim_2": stim_2,
                         "response_ts": self._to_json_1d(mean_resp[ch_idx]),
+                        "response_ts_std": self._to_json_1d(std_resp[ch_idx]),
                         "soz_label": soz_label,
                         "recording_x": rec_coord[0],
                         "recording_y": rec_coord[1],
@@ -692,6 +701,7 @@ class RESPectCCEPDataset(BaseDataset):
             "stim_1",
             "stim_2",
             "response_ts",
+            "response_ts_std",
             "soz_label",
             "recording_x",
             "recording_y",
