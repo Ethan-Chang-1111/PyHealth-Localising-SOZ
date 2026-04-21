@@ -373,6 +373,8 @@ class SPESResNet(BaseModel):
             logit = logit.squeeze(-1)
             
         y_true = kwargs.get(self.label_key)
+        if self.mode == "binary" and y_true is not None and y_true.ndim > 1:
+            y_true = y_true.squeeze(-1)
         loss_fn = self.get_loss_function()
         loss = loss_fn(logit, y_true.float() if self.mode == "binary" else y_true)
         y_prob = self.prepare_y_prob(logit)

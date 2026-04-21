@@ -38,8 +38,19 @@ class SPESResponseEncoder(nn.Module):
     A neural network model for classifying responses to Single Pulse Electrical Stimulation (SPES).
     The full model incorporates both convolutional and MLP embeddings, with a transformer encoder for the final classification.
     """
-    def __init__(self, mean: bool, std: bool, conv_embedding: bool = True, mlp_embedding: bool = True, 
-                 dropout_rate=0.5, num_layers=2, embedding_dim=64, random_channels=None, noise_std=0.1):
+    def __init__(
+        self,
+        mean: bool,
+        std: bool,
+        conv_embedding: bool = True,
+        mlp_embedding: bool = True,
+        dropout_rate: float = 0.5,
+        num_layers: int = 2,
+        embedding_dim: int = 64,
+        random_channels=None,
+        noise_std: float = 0.1,
+        include_distance: bool = True,
+    ):
         """
         Initialize the SPESResponseEncoder class.
 
@@ -107,8 +118,14 @@ class SPESResponseEncoder(nn.Module):
             distances = x[:, 0, :, 0]
             all_x = []
 
-            for single_sample, distance in zip(x, distances):
+            for sample_idx, (single_sample, distance) in enumerate(zip(x, distances)):
                 valid_rows = torch.where(distance != 0)[0]
+                if len(valid_rows) == 0:
+                    ts_std = single_sample[1, :, 1:]
+                    valid_rows = torch.where(ts_std.sum(dim=-1) != 0)[0]
+
+                if len(valid_rows) == 0:
+                    valid_rows = torch.arange(single_sample.shape[1], device=x.device)
 
                 if len(valid_rows) < self.random_channels:
                     idx = torch.randint(0, len(valid_rows), (self.random_channels,), device=x.device)
@@ -280,6 +297,8 @@ class SPESTransformer(BaseModel):
             logit = logit.squeeze(-1)
             
         y_true = kwargs.get(self.label_key)
+        if self.mode == "binary" and y_true is not None and y_true.ndim > 1:
+            y_true = y_true.squeeze(-1)
 
         loss_fn = self.get_loss_function()
         loss = loss_fn(logit, y_true.float() if self.mode == "binary" else y_true)
