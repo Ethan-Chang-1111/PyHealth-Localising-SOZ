@@ -1,7 +1,7 @@
 """PyHealth dataset for RESPect CCEP
 
-Contributor: 
-NetID: 
+Contributor: Jacky Chen
+NetID: jackyc3
 Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
 Paper Link: https://proceedings.mlr.press/v252/norris24a.html
 Description: PyHealth dataset loader for RESPect CCEP (OpenNeuro ds004080) handling BIDS-style timeseries data.

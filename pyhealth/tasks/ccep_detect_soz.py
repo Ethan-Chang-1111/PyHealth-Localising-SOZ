@@ -1,6 +1,6 @@
 """
 Contributor: Ethan Chang
-NetID: 
+NetID: ethanc8
 Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
 Paper Link: https://proceedings.mlr.press/v252/norris24a.html
 Description: PyHealth task for Seizure Onset Zone (SOZ) localisation from SPES responses.
