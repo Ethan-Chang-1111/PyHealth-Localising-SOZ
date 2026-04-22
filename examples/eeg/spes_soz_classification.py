@@ -8,9 +8,49 @@ Trainer -> AUROC, AUPRC, and related binary metrics.
 Data sources:
 
     Real data:
-        Pass --dataset-root pointing at a RESPect / OpenNeuro ds004080 layout.
+        Pass ``--dataset-root`` pointing at a RESPect / OpenNeuro ds004080 layout.
     Synthetic (default):
-        If --dataset-root is omitted, writes minimal CSVs under a temp directory.
+        If ``--dataset-root`` is omitted, writes minimal CSVs under a temp
+        directory.
+
+Command-line arguments:
+
+    --dataset-root (str, optional):
+        Path to a RESPect CCEP root (e.g. OpenNeuro ds004080). Default: omitted
+        (synthetic mode).
+    --synthetic-patients (int):
+        Synthetic cohort size when not using ``--dataset-root``. Default: 10.
+    --synthetic-electrodes (int):
+        Recording contacts per synthetic patient. Default: 20.
+    --synthetic-stim-pairs (int):
+        Stimulation pairs sampled per synthetic patient. Default: 6.
+    --timesteps (int):
+        Mean/std response length for synthetic rows. Default: 509.
+    --synthetic-annotated-ratio (float):
+        Fraction of synthetic patients with SOZ maps. Default: 0.5.
+    --synthetic-soz-positive-ratio (float):
+        SOZ-positive electrode fraction among annotated patients. Default: 0.144.
+
+Usage:
+
+    From the repo root, synthetic demo (all defaults)::
+
+        python examples/eeg/spes_soz_classification.py
+
+    Real RESPect layout on disk::
+
+        python examples/eeg/spes_soz_classification.py \\
+            --dataset-root /path/to/ds004080
+
+    Custom synthetic cohort::
+
+        python examples/eeg/spes_soz_classification.py \\
+            --synthetic-patients 8 \\
+            --synthetic-electrodes 16 \\
+            --synthetic-stim-pairs 5 \\
+            --timesteps 400 \\
+            --synthetic-annotated-ratio 0.6 \\
+            --synthetic-soz-positive-ratio 0.2
 
 Examples:
     >>> cfgs = get_spes_classification_configs()
