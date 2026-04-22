@@ -3,19 +3,17 @@ SPES CNN-Transformer model.
 
 Contributor: Sebastian Ho
 NetID: sho28
-Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
+Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical \
+    Stimulation Responses with a CNN Transformer
 Paper Link: https://proceedings.mlr.press/v252/norris24a.html
-Description: Convolutional-Transformer encoder model implementation for SPES Seizure Onset Zone Localisation.
-
-Paper: Localising the Seizure Onset Zone from Single-Pulse Electrical 
-Stimulation Responses with a CNN Transformer (Norris et al. 2024).
-https://proceedings.mlr.press/v252/norris24a.html
+Description: Convolutional-Transformer encoder for SPES seizure-onset-zone \
+    localisation (Norris et al. 2024).
 
 Original Code: https://github.com/norrisjamie23/Localising_SOZ_from_SPES/
 """
 
 import random
-from typing import Dict, List, Optional
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -34,10 +32,32 @@ from pyhealth.models.spes_resnet import MSResNet
 
 
 class SPESResponseEncoder(nn.Module):
+    """Convolutional and transformer encoder for SPES / CCEP SOZ classification.
+
+    Embeds each recording channel with an optional MSResNet branch and/or flattened
+    statistics, projects to embedding_dim, then applies nn.TransformerEncoder
+    with a learned class token.
+
+    Inputs match the layout used inside SPESTransformer.forward after the batch
+    transpose: tensor x shaped (batch, 2, n_channels, timesteps + 1) (mean and
+    std modes on the length-2 axis; time index 0 may hold distance).
+
+    Args:
+        mean: If True, use the mean response mode in embeddings.
+        std: If True, use the std response mode in embeddings.
+        conv_embedding: Enable MSResNet per channel. Default: True.
+        mlp_embedding: Concatenate early time slices with conv features. Default: True.
+        dropout_rate: Dropout on projection and transformer. Default: 0.5.
+        num_layers: Transformer encoder depth. Default: 2.
+        embedding_dim: Hidden size / patch width. Default: 64.
+        random_channels: If set, subsample exactly this many channels. Default: None.
+        noise_std: Gaussian noise on responses while training. Default: 0.1.
+        include_distance: Keep distance at time index 0. Default: True.
+
+    Raises:
+        AssertionError: If mean and std are both False.
     """
-    A neural network model for classifying responses to Single Pulse Electrical Stimulation (SPES).
-    The full model incorporates both convolutional and MLP embeddings, with a transformer encoder for the final classification.
-    """
+
     def __init__(
         self,
         mean: bool,
@@ -51,19 +71,19 @@ class SPESResponseEncoder(nn.Module):
         noise_std: float = 0.1,
         include_distance: bool = True,
     ):
-        """
-        Initialize the SPESResponseEncoder class.
+        """Create MSResNet (optional), linear patch embedding, and transformer stack.
 
         Args:
-            mean (bool): Flag indicating whether to include mean in embedding.
-            std (bool): Flag indicating whether to include standard deviation in embedding.
-            conv_embedding (bool, optional): Flag indicating whether to use convolutional embedding. Defaults to True.
-            mlp_embedding (bool, optional): Flag indicating whether to use MLP embedding. Defaults to True.
-            dropout_rate (float, optional): Dropout rate. Defaults to 0.5.
-            num_layers (int, optional): Number of transformer encoder layers. Defaults to 2.
-            embedding_dim (int, optional): Dimension of the embedding. Defaults to 64.
-            random_channels (None, optional): Random channels. Defaults to None.
-            noise_std (float, optional): Standard deviation of the noise to be added to the input. Defaults to 0.1.
+            mean: Use mean mode in the embedding path.
+            std: Use std mode in the embedding path.
+            conv_embedding: Run MSResNet branch. Default: True.
+            mlp_embedding: Add MLP-style time features when conv is on. Default: True.
+            dropout_rate: Dropout probability. Default: 0.5.
+            num_layers: Number of encoder layers. Default: 2.
+            embedding_dim: Model width. Default: 64.
+            random_channels: Fixed channel count per sample, or None. Default: None.
+            noise_std: Noise std on responses in training. Default: 0.1.
+            include_distance: Keep distance column. Default: True.
         """
         super(SPESResponseEncoder, self).__init__()
 
@@ -105,11 +125,13 @@ class SPESResponseEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
     def forward(self, x):
-        """
-        Forward pass.
+        """Encode SPES tensors to one vector per batch element.
+
         Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, modes, chans, timesteps].
-                              Modes corresponds to mean/std.
+            x: Tensor (batch, 2, n_channels, timesteps + 1) (see class docstring).
+
+        Returns:
+            Class-token outputs, shape (batch, embedding_dim).
         """
         if self.training:
             x = self.apply_noise_and_zero_channels(x)
@@ -153,7 +175,16 @@ class SPESResponseEncoder(nn.Module):
         return x[:, 0]
 
     def apply_noise_and_zero_channels(self, x):
-        """Applies noise to EEG data and zeros out random channels."""
+        """Augment training inputs with noise and random channel dropout.
+
+        Called from forward when self.training is True.
+
+        Args:
+            x: Tensor (batch, modes, channels, timesteps).
+
+        Returns:
+            Augmented tensor with the same shape as x.
+        """
         # Implementation of noise application and zeroing random channels
         non_zero_indices = torch.nonzero(x[:, 0, :, 0].sum(axis=0), as_tuple=False).squeeze(-1)
 
@@ -173,7 +204,17 @@ class SPESResponseEncoder(nn.Module):
         return x
 
     def create_key_padding_mask(self, distances):
-        """Creates a key padding mask based on the distances tensor."""
+        """Build a boolean padding mask for TransformerEncoder.
+
+        Prepends False for the class token column. Called from forward.
+
+        Args:
+            distances: Tensor (batch, n_channels); zero marks padding.
+
+        Returns:
+            Boolean mask shaped (batch, 1 + n_channels) suitable for
+            src_key_padding_mask.
+        """
         key_padding_mask = (distances == 0)
 
         # Prepend a false column for the class token
@@ -183,10 +224,15 @@ class SPESResponseEncoder(nn.Module):
         return key_padding_mask
 
     def prepare_channels(self, x):
-        """
-        Prepares each channel prior to embedding.
+        """Fuse per-channel features before patch_to_embedding.
+
+        Called from forward after optional subsampling.
+
         Args:
-            x (torch.Tensor): [batch_size, modes, chans, timesteps]
+            x: Tensor (batch, modes, channels, timesteps).
+
+        Returns:
+            Tensor (batch, channels, feature_dim) fed into the linear projector.
         """
         start_idx = 0 if self.include_distance else 1
         if self.conv_embedding:
@@ -227,10 +273,50 @@ class SPESResponseEncoder(nn.Module):
 
 
 class SPESTransformer(BaseModel):
+    """CNN-transformer for SPES / CCEP seizure-onset-zone localisation.
+
+    Norris et al. (ML4H 2024) style model: multi-scale 1D convolutions plus a
+    transformer over per-channel tokens, exposed through BaseModel / Trainer.
+
+    Expected batch keys (e.g. from SeizureOnsetZoneLocalisation):
+
+        * spes_responses: (batch, max_channels, 2, timesteps + 1) before the
+          internal transpose to (batch, 2, max_channels, timesteps + 1).
+        * soz_label (or label_key): binary labels.
+
+    Args:
+        dataset: Task SampleDataset for BaseModel.
+        feature_keys: Input keys. Default: ["spes_responses"].
+        label_key: Label key. Default: "soz_label".
+        mode: Optional mode override (else inferred from schema).
+        mean: Forwarded to SPESResponseEncoder. Default: True.
+        std: Forwarded to SPESResponseEncoder. Default: True.
+        conv_embedding: Forwarded to SPESResponseEncoder. Default: True.
+        mlp_embedding: Forwarded to SPESResponseEncoder. Default: True.
+        dropout_rate: Dropout on encoder and head. Default: 0.5.
+        num_layers: Transformer depth. Default: 2.
+        embedding_dim: Encoder width. Default: 64.
+        random_channels: Channel subsample count, or None. Default: None.
+        noise_std: Encoder training noise. Default: 0.0.
+        include_distance: Keep distance at time index 0. Default: True.
+        **kwargs: Unused; accepted for API compatibility.
+
+    Examples:
+        >>> from pyhealth.datasets.respectccep import RESPectCCEPDataset
+        >>> from pyhealth.tasks.ccep_detect_soz import SeizureOnsetZoneLocalisation
+        >>> from pyhealth.models import SPESTransformer
+        >>> base = RESPectCCEPDataset(root="/path/to/respect_ccep")
+        >>> sample_dataset = base.set_task(
+        ...     SeizureOnsetZoneLocalisation(spes_mode="convergent")
+        ... )
+        >>> model = SPESTransformer(
+        ...     dataset=sample_dataset,
+        ...     embedding_dim=64,
+        ...     num_layers=2,
+        ...     random_channels=16,
+        ... )
     """
-    SPES_Transformer model for Seizure Onset Zone localisation.
-    Integrates the SPESResponseEncoder directly.
-    """
+
     def __init__(
         self,
         dataset,
@@ -249,6 +335,25 @@ class SPESTransformer(BaseModel):
         include_distance=True,
         **kwargs
     ):
+        """Build SPESResponseEncoder and the classifier MLP head.
+
+        Args:
+            dataset: Task dataset for schema and loss.
+            feature_keys: Feature keys; default ["spes_responses"].
+            label_key: Label key; default "soz_label".
+            mode: Optional mode override.
+            mean: Encoder mean flag. Default: True.
+            std: Encoder std flag. Default: True.
+            conv_embedding: Encoder conv path. Default: True.
+            mlp_embedding: Encoder MLP path. Default: True.
+            dropout_rate: Dropout. Default: 0.5.
+            num_layers: Encoder depth. Default: 2.
+            embedding_dim: Hidden size. Default: 64.
+            random_channels: Channel subsample. Default: None.
+            noise_std: Encoder noise. Default: 0.0.
+            include_distance: Keep distance. Default: True.
+            **kwargs: Reserved.
+        """
         super(SPESTransformer, self).__init__(
             dataset=dataset,
         )
@@ -282,10 +387,15 @@ class SPESTransformer(BaseModel):
             nn.init.zeros_(self.fc[1].bias)
 
     def forward(self, **kwargs) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass.
+        """Forward pass returning logits and optional loss.
+
         Args:
-            **kwargs: Contains 'spes_responses' tensor of shape [batch, max_C, 2, T+1]
+            **kwargs: Requires spes_responses; pass labels under label_key for
+                loss (default key soz_label).
+
+        Returns:
+            Dict[str, torch.Tensor]: logit, y_prob, y_true, loss per
+            BaseModel conventions.
         """
         # [batch_size, max_C, 2, T+1] -> [batch_size, 2, max_C, T+1]
         input_x = kwargs["spes_responses"].to(self.device)

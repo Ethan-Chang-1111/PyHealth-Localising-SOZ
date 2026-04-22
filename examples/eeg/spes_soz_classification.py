@@ -1,11 +1,28 @@
-"""SPES SOZ classification experiments from Norris et al. (ML4H 2024).
+"""Train and evaluate SPES SOZ classifiers on RESPect-style CCEP data.
 
-The only difference between modes is the data source:
-- real: load from an existing RESPect CCEP root path
-- synthetic: generate a RESPect-compatible CSV under a temporary root
+Reproduces a small Norris et al. (ML4H 2024) style comparison of SPESResNet and
+SPESTransformer (divergent vs convergent SPES, with/without distance features).
+Pipeline: RESPectCCEPDataset -> SeizureOnsetZoneLocalisation -> split ->
+Trainer -> AUROC, AUPRC, and related binary metrics.
 
-Both modes then run the same flow:
-RESPectCCEPDataset -> SeizureOnsetZoneLocalisation -> split/loaders -> training.
+Data sources:
+
+    Real data:
+        Pass --dataset-root pointing at a RESPect / OpenNeuro ds004080 layout.
+    Synthetic (default):
+        If --dataset-root is omitted, writes minimal CSVs under a temp directory.
+
+Examples:
+    >>> cfgs = get_spes_classification_configs()
+    >>> {c["name"] for c in cfgs} == {
+    ...     "cnn_resnet_divergent_no_features",
+    ...     "cnn_resnet_divergent_with_features",
+    ...     "cnn_resnet_convergent_no_features",
+    ...     "cnn_resnet_convergent_with_features",
+    ...     "cnn_transformer_convergent_no_features",
+    ...     "cnn_transformer_convergent_with_features",
+    ... }
+    True
 """
 
 from __future__ import annotations
@@ -14,7 +31,7 @@ import argparse
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,7 +54,14 @@ SYNTHETIC_SOZ_POSITIVE_RATIO = 0.144
 
 
 def _to_json_1d(arr: np.ndarray) -> str:
-    """Serialize a 1-D float32 array in dataset-compatible format."""
+    """Serialize a 1-D float32 array as compact JSON (RESPect CSV format).
+
+    Args:
+        arr: One-dimensional NumPy array.
+
+    Returns:
+        JSON string with no extra whitespace, suitable for response_ts columns.
+    """
     return json.dumps(arr.astype(np.float32).tolist(), separators=(",", ":"))
 
 
@@ -46,7 +70,16 @@ def _pick_stim_pairs(
     n_pairs: int,
     rng: np.random.Generator,
 ) -> List[Tuple[str, str]]:
-    """Pick unique stimulation pairs from available electrodes."""
+    """Sample up to n_pairs unique stimulation pairs from electrodes.
+
+    Args:
+        electrodes: Ordered contact names.
+        n_pairs: Desired number of pairs (capped by available combinations).
+        rng: NumPy random generator for shuffling.
+
+    Returns:
+        List of (stim_a, stim_b) tuples with a before b in electrodes.
+    """
     pairs: List[Tuple[str, str]] = []
     for i in range(len(electrodes)):
         for j in range(i + 1, len(electrodes)):
@@ -64,7 +97,27 @@ def _build_synthetic_respect_table(
     annotated_patient_ratio: float,
     soz_positive_ratio: float,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Create synthetic RESPect-compatible participants and row table."""
+    """Create synthetic RESPect-compatible participants and CCEP row tables.
+
+    Called from _create_synthetic_dataset_root.
+
+    Args:
+        n_patients: Synthetic cohort size (>= 2).
+        n_electrodes: Recording contacts per patient (>= 4).
+        n_stim_pairs: Target pair count (capped by combinatorics).
+        timesteps: Mean/std vector length (>= 200 for SPES models).
+        seed: RNG seed.
+        annotated_patient_ratio: Fraction of patients with non-trivial SOZ maps.
+        soz_positive_ratio: Positive electrode rate among annotated patients.
+
+    Returns:
+        Tuple (participants_df, rows_df) for participants.tsv and
+        respect_ccep_data-pyhealth.csv.
+
+    Raises:
+        ValueError: If arguments are outside supported ranges.
+    """
+
     if n_patients < 2:
         raise ValueError("n_patients must be >= 2.")
     if n_electrodes < 4:
@@ -156,7 +209,27 @@ def _create_synthetic_dataset_root(
     annotated_patient_ratio: float,
     soz_positive_ratio: float,
 ) -> str:
-    """Create a synthetic RESPect dataset root for RESPectCCEPDataset."""
+    """Write synthetic RESPect CSVs under base_dir.
+
+    Called from __main__ when --dataset-root is not set.
+
+    Args:
+        base_dir: Existing directory (usually from tempfile.TemporaryDirectory).
+        n_patients: Cohort size.
+        n_electrodes: Contacts per patient.
+        n_stim_pairs: Stimulation pairs per patient.
+        timesteps: Response length.
+        seed: RNG seed for _build_synthetic_respect_table.
+        annotated_patient_ratio: Annotated patient fraction.
+        soz_positive_ratio: SOZ-positive electrode fraction.
+
+    Returns:
+        base_dir as a string after files are written.
+
+    Raises:
+        ValueError: If _build_synthetic_respect_table rejects the arguments.
+    """
+
     root = Path(base_dir)
     participants_df, rows_df = _build_synthetic_respect_table(
         n_patients=n_patients,
@@ -173,7 +246,20 @@ def _create_synthetic_dataset_root(
 
 
 def get_spes_classification_configs() -> List[Dict[str, Any]]:
-    """Return paper-aligned SPES SOZ model configurations."""
+    """Return ordered model configurations for the benchmark sweep.
+
+    Each dict has name, model_type (spes_resnet or spes_transformer),
+    paradigm (divergent or convergent), and include_distance.
+
+    Returns:
+        List of configs passed to build_spes_classification_model and
+        run_spes_soz_classification.
+
+    Examples:
+        >>> get_spes_classification_configs()[0]["model_type"]
+        'spes_resnet'
+    """
+
     return [
         {
             "name": "cnn_resnet_divergent_no_features",
@@ -215,7 +301,22 @@ def get_spes_classification_configs() -> List[Dict[str, Any]]:
 
 
 def build_spes_classification_model(config: Dict[str, Any], dataset):
-    """Instantiate one SPES SOZ classification model configuration."""
+    """Build one model instance for a sweep entry.
+
+    Called from run_spes_soz_classification for each config.
+
+    Args:
+        config: Must include model_type and include_distance (see
+            get_spes_classification_configs).
+        dataset: Task-processed dataset (same instance passed to Trainer).
+
+    Returns:
+        SPESResNet or SPESTransformer with demo-sized hyperparameters.
+
+    Raises:
+        ValueError: If model_type is unknown.
+    """
+
     include_distance = bool(config["include_distance"])
     if config["model_type"] == "spes_resnet":
         return SPESResNet(
@@ -244,7 +345,19 @@ def _build_task_dataset_from_root(
     dataset_root: str,
     paradigm: str,
 ):
-    """Build task-processed samples from a RESPect dataset root."""
+    """Load RESPect data and attach the SOZ localisation task.
+
+    Called from run_spes_soz_classification before splitting.
+
+    Args:
+        dataset_root: Root passed to RESPectCCEPDataset.
+        paradigm: spes_mode for SeizureOnsetZoneLocalisation (divergent or
+            convergent).
+
+    Returns:
+        SampleDataset from set_task, ready for get_dataloader.
+    """
+
     base_dataset = RESPectCCEPDataset(root=dataset_root)
     task = SeizureOnsetZoneLocalisation(spes_mode=paradigm)
     return base_dataset.set_task(task)
@@ -255,15 +368,21 @@ def _compute_paper_metrics(
     y_prob: np.ndarray,
     threshold: float = 0.5,
 ) -> Dict[str, float]:
-    """Compute paper-aligned binary metrics from predictions.
+    """Compute AUROC, AUPRC, sensitivity, specificity, and Youden index.
 
-    Metrics:
-    - AUROC
-    - AUPRC
-    - sensitivity (recall)
-    - specificity
-    - Youden index = sensitivity + specificity - 1
+    AUROC is nan when y_true contains only one class. Called from
+    run_spes_soz_classification on test predictions.
+
+    Args:
+        y_true: Ground-truth binary labels.
+        y_prob: Predicted positive-class probabilities.
+        threshold: Decision threshold on y_prob. Default: 0.5.
+
+    Returns:
+        Metric name to float value (including auroc, auprc, sensitivity,
+        specificity, youden).
     """
+
     y_true = np.asarray(y_true).reshape(-1).astype(np.int64)
     y_prob = np.asarray(y_prob).reshape(-1)
     y_pred = (y_prob >= threshold).astype(np.int64)
@@ -286,13 +405,21 @@ def _compute_paper_metrics(
 
 
 def run_spes_soz_classification(dataset_root: str) -> List[Dict[str, float]]:
-    """Run SPES SOZ classification with the shared dataset-task pipeline.
+    """Train/evaluate every entry in get_spes_classification_configs.
 
-    This compares paper-relevant configurations:
-    - CNN ResNet in divergent and convergent paradigms
-    - CNN Transformer in convergent paradigm
-    - each with/without distance (spatial) feature usage
+    For each config: rebuild the task dataset from dataset_root, split
+    train/val/test (patient-level when enough patients exist), fit with
+    Trainer, then score on the test loader.
+
+    Args:
+        dataset_root: RESPect root with participants.tsv and
+            respect_ccep_data-pyhealth.csv (real or synthetic).
+
+    Returns:
+        One dict per config: config (name string) plus metrics from
+        _compute_paper_metrics and loss.
     """
+
     results: List[Dict[str, float]] = []
     for config in get_spes_classification_configs():
         sample_dataset = _build_task_dataset_from_root(
@@ -339,8 +466,8 @@ def run_spes_soz_classification(dataset_root: str) -> List[Dict[str, float]]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "SPES SOZ classification experiments. Use --dataset-root to run the real "
-            "RESPectCCEPDataset + SeizureOnsetZoneLocalisation pipeline."
+            "SPES SOZ classification experiments. Use --dataset-root for a real "
+            "RESPectCCEPDataset + SeizureOnsetZoneLocalisation run."
         )
     )
     parser.add_argument(

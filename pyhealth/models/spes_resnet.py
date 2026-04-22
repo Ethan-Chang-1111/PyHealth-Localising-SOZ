@@ -3,9 +3,11 @@ SPES CNN baseline model (MSResNet).
 
 Contributor: Sebastian Ho   
 NetID: sho28
-Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical Stimulation Responses with a CNN Transformer
+Paper Title: Localising the Seizure Onset Zone from Single-Pulse Electrical \
+    Stimulation Responses with a CNN Transformer
 Paper Link: https://proceedings.mlr.press/v252/norris24a.html
-Description: Baseline MSResNet CNN model implementation for SPES Seizure Onset Zone Localisation.
+Description: Baseline MSResNet CNN model for SPES seizure-onset-zone \
+    localisation.
 
 Original Code: https://github.com/norrisjamie23/Localising_SOZ_from_SPES/
 Baseline method adapted from https://github.com/geekfeiw/Multi-Scale-1D-ResNet
@@ -279,12 +281,45 @@ class MSResNet(nn.Module):
 # -----------------------------------------------------------------------------
 
 class SPESResNet(BaseModel):
+    """Multi-scale ResNet baseline for SPES-based SOZ localisation.
+
+    Wraps the MSResNet (1D multi-branch ResNet) baseline from Norris et al. (ML4H
+    2024) for binary seizure-onset-zone (SOZ) classification from cortico-cortical
+    evoked potential (CCEP / SPES-style) tensors from PyHealth tasks.
+
+    Expected batch keys (from SeizureOnsetZoneLocalisation or compatible tasks):
+
+        * spes_responses: float tensor shaped
+          (batch, max_channels, 2, timesteps + 1). The length-2 axis holds mean and
+          std response modes; time index 0 may store per-channel distance (or padding)
+          when enabled.
+        * soz_label (or label_key): binary labels for the batch.
+
+    Args:
+        dataset: Task-processed SampleDataset; passed to BaseModel for loss
+            and label schema.
+        feature_keys: Keys to read from each sample. Default: ["spes_responses"].
+        label_key: Supervision key. Default: "soz_label".
+        mode: Optional mode override; if omitted, BaseModel infers from the
+            dataset schema.
+        input_channels: Channels sampled per example for the backbone. Default: 40.
+        noise_std: Std of additive Gaussian noise on responses while training; 0
+            disables. Default: 0.1.
+        include_distance: If True, keep the distance column in the 1D MSResNet input;
+            if False, use only the response time series. Default: False.
+        **kwargs: Forwarded to MSResNet (e.g. layers, dropout_rate).
+
+    Examples:
+        >>> from pyhealth.datasets.respectccep import RESPectCCEPDataset
+        >>> from pyhealth.tasks.ccep_detect_soz import SeizureOnsetZoneLocalisation
+        >>> from pyhealth.models import SPESResNet
+        >>> base = RESPectCCEPDataset(root="/path/to/respect_ccep")
+        >>> sample_dataset = base.set_task(
+        ...     SeizureOnsetZoneLocalisation(spes_mode="convergent")
+        ... )
+        >>> model = SPESResNet(dataset=sample_dataset, input_channels=40)
     """
-    A modified ResNet model for SOZ classification from iEEG data, wrapped for PyHealth.
-    This model implements the original SPES_ResNet baseline from the ML4H 2024 paper.
-    It takes fixed multi-channel input (via multinomial sampling over valid channels)
-    and processes it through a Multi-Scale ResNet (MSResNet) architecture.
-    """
+
     def __init__(
         self,
         dataset,
@@ -296,6 +331,18 @@ class SPESResNet(BaseModel):
         include_distance=False,
         **kwargs
     ):
+        """Build MSResNet trunk and linear head for SOZ logits.
+
+        Args:
+            dataset: SampleDataset with input/output schema for the task.
+            feature_keys: Feature keys; default ["spes_responses"].
+            label_key: Label key; default "soz_label".
+            mode: Optional mode override (otherwise inferred by BaseModel).
+            input_channels: Subsampled channel count per forward pass. Default: 40.
+            noise_std: Gaussian noise std on responses during training. Default: 0.1.
+            include_distance: Include distance in the 1D input. Default: False.
+            **kwargs: Extra args for MSResNet.
+        """
         super(SPESResNet, self).__init__(
             dataset=dataset,
         )
@@ -317,15 +364,16 @@ class SPESResNet(BaseModel):
         self.fc = nn.Linear(768, num_classes)
 
     def forward(self, **kwargs) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass for PyHealth Trainer integration.
+        """Run one forward pass (Trainer / inference).
 
         Args:
-            **kwargs: Contains 'spes_responses' tensor of shape [batch, max_C, 2, T+1]
-                      and 'soz_label' tensor of shape [batch, 1] (or [batch]).
+            **kwargs: At minimum spes_responses of shape
+                (batch, max_C, 2, T + 1). For loss, also pass the label under
+                label_key (default soz_label) as (batch,) or (batch, 1).
 
         Returns:
-            Dictionary containing loss, probabilities, ground truth, and logits.
+            Dict[str, torch.Tensor]: logit, y_prob, and optionally loss and
+            y_true when labels are provided.
         """
         # Ensure batch tensors are on the same device as model weights.
         input_x = kwargs["spes_responses"].to(self.device)
